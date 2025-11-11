@@ -15,7 +15,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./nba_analytics.db")
 
 # Handle Railway PostgreSQL URL format (postgres:// -> postgresql://)
 if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
 # Create engine
 if DATABASE_URL.startswith("sqlite"):
@@ -26,7 +28,7 @@ if DATABASE_URL.startswith("sqlite"):
         poolclass=StaticPool
     )
 else:
-    # PostgreSQL for production
+    # PostgreSQL for production (using psycopg3)
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 # Create session factory
