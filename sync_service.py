@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional
 import os
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from database import Player, Team, Game, GameStats, SyncLog
 from db_session import get_db_context
@@ -44,32 +45,47 @@ class DataSyncService:
         teams_data = data.get("data", [])
         
         synced = 0
-        for team_data in teams_data:
-            team = db.query(Team).filter(Team.id == team_data["id"]).first()
-            
-            if not team:
-                team = Team(
-                    id=team_data["id"],
-                    abbreviation=team_data["abbreviation"],
-                    city=team_data.get("city"),
-                    conference=team_data.get("conference"),
-                    division=team_data.get("division"),
-                    full_name=team_data.get("full_name"),
-                    name=team_data.get("name")
-                )
-                db.add(team)
-                synced += 1
-            else:
-                # Update existing team
-                team.abbreviation = team_data["abbreviation"]
-                team.city = team_data.get("city")
-                team.conference = team_data.get("conference")
-                team.division = team_data.get("division")
-                team.full_name = team_data.get("full_name")
-                team.name = team_data.get("name")
+        updated = 0
         
-        db.commit()
-        print(f"✅ Teams synced: {synced} new, {len(teams_data) - synced} updated")
+        for team_data in teams_data:
+            try:
+                team = db.query(Team).filter(Team.id == team_data["id"]).first()
+                
+                if not team:
+                    team = Team(
+                        id=team_data["id"],
+                        abbreviation=team_data["abbreviation"],
+                        city=team_data.get("city"),
+                        conference=team_data.get("conference"),
+                        division=team_data.get("division"),
+                        full_name=team_data.get("full_name"),
+                        name=team_data.get("name")
+                    )
+                    db.add(team)
+                    synced += 1
+                else:
+                    # Update existing team
+                    team.abbreviation = team_data["abbreviation"]
+                    team.city = team_data.get("city")
+                    team.conference = team_data.get("conference")
+                    team.division = team_data.get("division")
+                    team.full_name = team_data.get("full_name")
+                    team.name = team_data.get("name")
+                    updated += 1
+                
+                # Commit after each team to avoid batch conflicts
+                db.commit()
+                
+            except IntegrityError as e:
+                db.rollback()
+                print(f"⚠️  Team {team_data.get('abbreviation')} already exists, skipping...")
+                continue
+            except Exception as e:
+                db.rollback()
+                print(f"⚠️  Error syncing team {team_data.get('abbreviation')}: {e}")
+                continue
+        
+        print(f"✅ Teams synced: {synced} new, {updated} updated")
         return len(teams_data)
     
     async def sync_players(self, db: Session) -> int:
@@ -95,34 +111,53 @@ class DataSyncService:
             await asyncio.sleep(0.1)  # Rate limiting
         
         synced = 0
-        for player_data in all_players:
-            player = db.query(Player).filter(Player.id == player_data["id"]).first()
-            
-            team_data = player_data.get("team", {})
-            
-            if not player:
-                player = Player(
-                    id=player_data["id"],
-                    first_name=player_data["first_name"],
-                    last_name=player_data["last_name"],
-                    position=player_data.get("position"),
-                    team_id=team_data.get("id") if team_data else None,
-                    team_name=team_data.get("full_name") if team_data else None,
-                    team_abbreviation=team_data.get("abbreviation") if team_data else None
-                )
-                db.add(player)
-                synced += 1
-            else:
-                # Update existing player
-                player.first_name = player_data["first_name"]
-                player.last_name = player_data["last_name"]
-                player.position = player_data.get("position")
-                player.team_id = team_data.get("id") if team_data else None
-                player.team_name = team_data.get("full_name") if team_data else None
-                player.team_abbreviation = team_data.get("abbreviation") if team_data else None
+        updated = 0
         
-        db.commit()
-        print(f"✅ Players synced: {synced} new, {len(all_players) - synced} updated")
+        for player_data in all_players:
+            try:
+                player = db.query(Player).filter(Player.id == player_data["id"]).first()
+                
+                team_data = player_data.get("team", {})
+                
+                if not player:
+                    player = Player(
+                        id=player_data["id"],
+                        first_name=player_data["first_name"],
+                        last_name=player_data["last_name"],
+                        position=player_data.get("position"),
+                        team_id=team_data.get("id") if team_data else None,
+                        team_name=team_data.get("full_name") if team_data else None,
+                        team_abbreviation=team_data.get("abbreviation") if team_data else None
+                    )
+                    db.add(player)
+                    synced += 1
+                else:
+                    # Update existing player
+                    player.first_name = player_data["first_name"]
+                    player.last_name = player_data["last_name"]
+                    player.position = player_data.get("position")
+                    player.team_id = team_data.get("id") if team_data else None
+                    player.team_name = team_data.get("full_name") if team_data else None
+                    player.team_abbreviation = team_data.get("abbreviation") if team_data else None
+                    updated += 1
+                
+                # Commit in batches to improve performance but avoid large batch errors
+                if (synced + updated) % 50 == 0:
+                    db.commit()
+                    
+            except Exception as e:
+                db.rollback()
+                print(f"⚠️  Error syncing player {player_data.get('id')}: {e}")
+                continue
+        
+        # Final commit for remaining players
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"⚠️  Error in final player commit: {e}")
+        
+        print(f"✅ Players synced: {synced} new, {updated} updated")
         return len(all_players)
     
     async def sync_games_for_date_range(
@@ -175,62 +210,81 @@ class DataSyncService:
         stats_synced = 0
         
         for stat in all_stats:
-            game_data = stat.get("game", {})
-            player_data = stat.get("player", {})
-            team_data = stat.get("team", {})
-            
-            # Ensure game exists
-            game = db.query(Game).filter(Game.id == game_data["id"]).first()
-            if not game:
-                game = Game(
-                    id=game_data["id"],
-                    date=datetime.fromisoformat(game_data["date"].replace('Z', '+00:00')).date(),
-                    season=game_data.get("season", season),
-                    status=game_data.get("status"),
-                    home_team_id=game_data.get("home_team_id"),
-                    visitor_team_id=game_data.get("visitor_team_id"),
-                    home_team_score=game_data.get("home_team_score"),
-                    visitor_team_score=game_data.get("visitor_team_score")
-                )
-                db.add(game)
-                games_synced += 1
-            
-            # Check if stat already exists
-            existing_stat = db.query(GameStats).filter(
-                GameStats.player_id == player_data["id"],
-                GameStats.game_id == game_data["id"]
-            ).first()
-            
-            if not existing_stat:
-                game_stat = GameStats(
-                    player_id=player_data["id"],
-                    game_id=game_data["id"],
-                    team_id=team_data.get("id"),
-                    is_home=game_data.get("home_team_id") == team_data.get("id"),
-                    minutes=stat.get("min"),
-                    fgm=stat.get("fgm", 0),
-                    fga=stat.get("fga", 0),
-                    fg_pct=stat.get("fg_pct"),
-                    fg3m=stat.get("fg3m", 0),
-                    fg3a=stat.get("fg3a", 0),
-                    fg3_pct=stat.get("fg3_pct"),
-                    ftm=stat.get("ftm", 0),
-                    fta=stat.get("fta", 0),
-                    ft_pct=stat.get("ft_pct"),
-                    oreb=stat.get("oreb", 0),
-                    dreb=stat.get("dreb", 0),
-                    reb=stat.get("reb", 0),
-                    ast=stat.get("ast", 0),
-                    stl=stat.get("stl", 0),
-                    blk=stat.get("blk", 0),
-                    turnover=stat.get("turnover", 0),
-                    pf=stat.get("pf", 0),
-                    pts=stat.get("pts", 0)
-                )
-                db.add(game_stat)
-                stats_synced += 1
+            try:
+                game_data = stat.get("game", {})
+                player_data = stat.get("player", {})
+                team_data = stat.get("team", {})
+                
+                # Ensure game exists
+                game = db.query(Game).filter(Game.id == game_data["id"]).first()
+                if not game:
+                    game = Game(
+                        id=game_data["id"],
+                        date=datetime.fromisoformat(game_data["date"].replace('Z', '+00:00')).date(),
+                        season=game_data.get("season", season),
+                        status=game_data.get("status"),
+                        home_team_id=game_data.get("home_team_id"),
+                        visitor_team_id=game_data.get("visitor_team_id"),
+                        home_team_score=game_data.get("home_team_score"),
+                        visitor_team_score=game_data.get("visitor_team_score")
+                    )
+                    db.add(game)
+                    games_synced += 1
+                
+                # Check if stat already exists
+                existing_stat = db.query(GameStats).filter(
+                    GameStats.player_id == player_data["id"],
+                    GameStats.game_id == game_data["id"]
+                ).first()
+                
+                if not existing_stat:
+                    game_stat = GameStats(
+                        player_id=player_data["id"],
+                        game_id=game_data["id"],
+                        team_id=team_data.get("id"),
+                        is_home=game_data.get("home_team_id") == team_data.get("id"),
+                        minutes=stat.get("min"),
+                        fgm=stat.get("fgm", 0),
+                        fga=stat.get("fga", 0),
+                        fg_pct=stat.get("fg_pct"),
+                        fg3m=stat.get("fg3m", 0),
+                        fg3a=stat.get("fg3a", 0),
+                        fg3_pct=stat.get("fg3_pct"),
+                        ftm=stat.get("ftm", 0),
+                        fta=stat.get("fta", 0),
+                        ft_pct=stat.get("ft_pct"),
+                        oreb=stat.get("oreb", 0),
+                        dreb=stat.get("dreb", 0),
+                        reb=stat.get("reb", 0),
+                        ast=stat.get("ast", 0),
+                        stl=stat.get("stl", 0),
+                        blk=stat.get("blk", 0),
+                        turnover=stat.get("turnover", 0),
+                        pf=stat.get("pf", 0),
+                        pts=stat.get("pts", 0)
+                    )
+                    db.add(game_stat)
+                    stats_synced += 1
+                
+                # Commit in batches
+                if (games_synced + stats_synced) % 100 == 0:
+                    try:
+                        db.commit()
+                    except Exception as e:
+                        db.rollback()
+                        print(f"⚠️  Error committing batch: {e}")
+                        
+            except Exception as e:
+                print(f"⚠️  Error processing stat: {e}")
+                continue
         
-        db.commit()
+        # Final commit
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"⚠️  Error in final commit: {e}")
+        
         print(f"✅ Synced {games_synced} games, {stats_synced} player stats")
         return games_synced
     
@@ -285,15 +339,18 @@ class DataSyncService:
                 
             except Exception as e:
                 print(f"❌ Daily sync failed: {e}")
-                log = SyncLog(
-                    sync_date=datetime.utcnow(),
-                    season=2024,
-                    games_synced=0,
-                    status="failed",
-                    error_message=str(e)[:500]
-                )
-                db.add(log)
-                db.commit()
+                try:
+                    log = SyncLog(
+                        sync_date=datetime.utcnow(),
+                        season=2024,
+                        games_synced=0,
+                        status="failed",
+                        error_message=str(e)[:500]
+                    )
+                    db.add(log)
+                    db.commit()
+                except Exception as log_error:
+                    print(f"⚠️  Could not log sync failure: {log_error}")
                 return False
 
 
