@@ -111,17 +111,51 @@ async def get_team(team_id: int):
     """Get specific team by ID"""
     return await forward_to_balldontlie(f"/v1/teams/{team_id}")
 
+@app.get("/api/v1/players/active")
+async def get_active_players(
+    search: Optional[str] = None,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    team_ids: Optional[List[int]] = Query(None, alias="team_ids[]"),
+    player_ids: Optional[List[int]] = Query(None, alias="player_ids[]"),
+    cursor: Optional[str] = None,
+    per_page: int = Query(25, le=100)
+):
+    """
+    Get ACTIVE NBA players only (current rosters)
+    ⚠️ USE THIS ENDPOINT FOR BETTING ANALYSIS - Only returns active players
+    """
+    params = {"per_page": per_page}
+    if search:
+        params["search"] = search
+    if first_name:
+        params["first_name"] = first_name
+    if last_name:
+        params["last_name"] = last_name
+    if team_ids:
+        params["team_ids[]"] = team_ids
+    if player_ids:
+        params["player_ids[]"] = player_ids
+    if cursor:
+        params["cursor"] = cursor
+    
+    return await forward_to_balldontlie("/v1/players/active", params)
+
 @app.get("/api/v1/players")
 async def get_players(
     search: Optional[str] = None,
     first_name: Optional[str] = None,
     last_name: Optional[str] = None,
-    team_ids: Optional[List[int]] = Query(None),
-    player_ids: Optional[List[int]] = Query(None),
+    team_ids: Optional[List[int]] = Query(None, alias="team_ids[]"),
+    player_ids: Optional[List[int]] = Query(None, alias="player_ids[]"),
     cursor: Optional[str] = None,
     per_page: int = Query(25, le=100)
 ):
-    """Search and list NBA players"""
+    """
+    Get ALL NBA players (includes historical/inactive players)
+    ⚠️ WARNING: This returns ALL players including inactive/retired
+    ⚠️ For betting analysis, use /api/v1/players/active instead
+    """
     params = {"per_page": per_page}
     if search:
         params["search"] = search
@@ -181,6 +215,7 @@ async def get_game(game_id: int):
 @app.get("/api/v1/stats")
 async def get_stats(
     player_ids: Optional[List[int]] = Query(None, alias="player_ids[]"),
+    game_ids: Optional[List[int]] = Query(None, alias="game_ids[]"),
     team_ids: Optional[List[int]] = Query(None, alias="team_ids[]"),
     dates: Optional[List[str]] = Query(None, alias="dates[]"),
     seasons: Optional[List[int]] = Query(None, alias="seasons[]"),
@@ -194,6 +229,8 @@ async def get_stats(
     params = {"per_page": per_page}
     if player_ids:
         params["player_ids[]"] = player_ids
+    if game_ids:
+        params["game_ids[]"] = game_ids
     if team_ids:
         params["team_ids[]"] = team_ids
     if dates:
@@ -211,6 +248,39 @@ async def get_stats(
     
     return await forward_to_balldontlie("/v1/stats", params)
 
+@app.get("/api/v1/stats/advanced")
+async def get_advanced_stats(
+    player_ids: Optional[List[int]] = Query(None, alias="player_ids[]"),
+    game_ids: Optional[List[int]] = Query(None, alias="game_ids[]"),
+    dates: Optional[List[str]] = Query(None, alias="dates[]"),
+    seasons: Optional[List[int]] = Query(None, alias="seasons[]"),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    postseason: Optional[bool] = None,
+    cursor: Optional[str] = None,
+    per_page: int = Query(25, le=100)
+):
+    """Get advanced statistics (GOAT tier)"""
+    params = {"per_page": per_page}
+    if player_ids:
+        params["player_ids[]"] = player_ids
+    if game_ids:
+        params["game_ids[]"] = game_ids
+    if dates:
+        params["dates[]"] = dates
+    if seasons:
+        params["seasons[]"] = seasons
+    if start_date:
+        params["start_date"] = start_date
+    if end_date:
+        params["end_date"] = end_date
+    if postseason is not None:
+        params["postseason"] = postseason
+    if cursor:
+        params["cursor"] = cursor
+    
+    return await forward_to_balldontlie("/v1/stats/advanced", params)
+
 # === GOAT TIER ENDPOINTS ===
 
 @app.get("/api/v1/season_averages/{category}")
@@ -225,9 +295,39 @@ async def get_season_averages(
 ):
     """
     Get season averages by category (GOAT tier only)
+    
     Categories: general, shooting, defense, clutch
-    Types: base, per_game, per_36, per_100, by_zone (shooting only)
+    
+    Types by category:
+    - general: base, advanced, usage, scoring, defense, misc
+    - clutch: base, advanced, usage, scoring, misc
+    - defense: 2_pointers, 3_pointers, greater_than_15ft, less_than_10ft, less_than_6ft, overall
+    - shooting: 5ft_range, by_zone
+    
+    Example: /api/v1/season_averages/general?season=2024&type=base
     """
+    # Validate category
+    valid_categories = ["general", "shooting", "defense", "clutch"]
+    if category not in valid_categories:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid category. Must be one of: {', '.join(valid_categories)}"
+        )
+    
+    # Validate type for category
+    category_types = {
+        "general": ["base", "advanced", "usage", "scoring", "defense", "misc"],
+        "clutch": ["base", "advanced", "usage", "scoring", "misc"],
+        "defense": ["2_pointers", "3_pointers", "greater_than_15ft", "less_than_10ft", "less_than_6ft", "overall"],
+        "shooting": ["5ft_range", "by_zone"]
+    }
+    
+    if type not in category_types.get(category, []):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid type '{type}' for category '{category}'. Valid types: {', '.join(category_types[category])}"
+        )
+    
     params = {
         "season": season,
         "season_type": season_type,
@@ -245,18 +345,24 @@ async def get_season_averages(
 async def get_leaders(
     stat_type: str,
     season: int,
-    season_type: str = "regular",
     cursor: Optional[str] = None,
     per_page: int = Query(25, le=100)
 ):
     """
     Get statistical leaders (GOAT tier only)
-    stat_type: pts, ast, reb, stl, blk, fg3m, etc.
+    
+    Valid stat_types: reb, dreb, tov, ast, oreb, min, pts, stl, blk
     """
+    valid_stat_types = ["reb", "dreb", "tov", "ast", "oreb", "min", "pts", "stl", "blk"]
+    if stat_type not in valid_stat_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stat_type. Must be one of: {', '.join(valid_stat_types)}"
+        )
+    
     params = {
         "stat_type": stat_type,
         "season": season,
-        "season_type": season_type,
         "per_page": per_page
     }
     if cursor:
@@ -266,43 +372,21 @@ async def get_leaders(
 
 @app.get("/api/v1/standings")
 async def get_standings(
-    season: int,
-    season_type: str = "regular",
-    conference: Optional[str] = None,
-    division: Optional[str] = None,
-    cursor: Optional[str] = None,
-    per_page: int = Query(25, le=100)
+    season: int
 ):
     """Get NBA standings (GOAT tier only)"""
-    params = {
-        "season": season,
-        "season_type": season_type,
-        "per_page": per_page
-    }
-    if conference:
-        params["conference"] = conference
-    if division:
-        params["division"] = division
-    if cursor:
-        params["cursor"] = cursor
-    
+    params = {"season": season}
     return await forward_to_balldontlie("/v1/standings", params)
 
 @app.get("/api/v1/player_injuries")
-async def get_player_injuries(
-    season: Optional[int] = None,
-    dates: Optional[List[str]] = Query(None, alias="dates[]"),
+async def get_injuries(
     team_ids: Optional[List[int]] = Query(None, alias="team_ids[]"),
     player_ids: Optional[List[int]] = Query(None, alias="player_ids[]"),
     cursor: Optional[str] = None,
     per_page: int = Query(25, le=100)
 ):
-    """Get player injury reports (GOAT tier only) - FIXED ENDPOINT"""
+    """Get injury reports (GOAT tier only)"""
     params = {"per_page": per_page}
-    if season:
-        params["season"] = season
-    if dates:
-        params["dates[]"] = dates
     if team_ids:
         params["team_ids[]"] = team_ids
     if player_ids:
@@ -312,52 +396,18 @@ async def get_player_injuries(
     
     return await forward_to_balldontlie("/v1/player_injuries", params)
 
-@app.get("/api/v1/active_players")
-async def get_active_players(
-    season: Optional[int] = None,
-    date: Optional[str] = None,
-    team_ids: Optional[List[int]] = Query(None, alias="team_ids[]"),
-    cursor: Optional[str] = None,
-    per_page: int = Query(25, le=100)
-):
-    """Get active players for a date (GOAT tier only)"""
-    params = {"per_page": per_page}
-    if season:
-        params["season"] = season
-    if date:
-        params["date"] = date
-    if team_ids:
-        params["team_ids[]"] = team_ids
-    if cursor:
-        params["cursor"] = cursor
-    
-    return await forward_to_balldontlie("/v1/active_players", params)
-
 @app.get("/api/v1/box_scores")
 async def get_box_scores(
-    game_ids: Optional[List[int]] = Query(None, alias="game_ids[]"),
-    dates: Optional[List[str]] = Query(None, alias="dates[]"),
-    cursor: Optional[str] = None,
-    per_page: int = Query(25, le=100)
+    date: str = Query(..., description="Date in YYYY-MM-DD format")
 ):
-    """Get detailed box scores (GOAT tier only)"""
-    params = {"per_page": per_page}
-    if game_ids:
-        params["game_ids[]"] = game_ids
-    if dates:
-        params["dates[]"] = dates
-    if cursor:
-        params["cursor"] = cursor
-    
+    """Get box scores for a specific date (GOAT tier only)"""
+    params = {"date": date}
     return await forward_to_balldontlie("/v1/box_scores", params)
 
 @app.get("/api/v1/box_scores/live")
-async def get_live_box_scores(
-    date: str
-):
-    """Get live box scores for a date (GOAT tier only)"""
-    params = {"date": date}
-    return await forward_to_balldontlie("/v1/box_scores/live", params)
+async def get_live_box_scores():
+    """Get live box scores for today (GOAT tier only)"""
+    return await forward_to_balldontlie("/v1/box_scores/live")
 
 # === NBA V2 ENDPOINTS (Betting Odds) ===
 
@@ -371,9 +421,17 @@ async def get_odds(
 ):
     """
     Get betting odds (GOAT tier only)
-    Includes spread, moneyline, total from multiple sportsbooks
-    Data available 24 hours before game start
+    
+    Vendors: betmgm, fanduel, draftkings, bet365, caesars, espnbet
+    
+    Note: Odds data available 24 hours before game start
     """
+    if not dates and not game_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one of 'dates' or 'game_ids' must be provided"
+        )
+    
     params = {"per_page": per_page}
     if dates:
         params["dates[]"] = dates
@@ -386,7 +444,7 @@ async def get_odds(
     
     return await forward_to_balldontlie("/v2/odds", params)
 
-# === BETTING ANALYTICS ENDPOINTS (Custom) ===
+# === CUSTOM BETTING ANALYTICS ENDPOINTS ===
 
 @app.get("/api/betting/todays-slate")
 async def get_todays_betting_slate():
@@ -407,7 +465,7 @@ async def get_todays_betting_slate():
     
     # Get injuries
     try:
-        injuries_data = await forward_to_balldontlie("/v1/player_injuries", {"dates[]": [today]})
+        injuries_data = await forward_to_balldontlie("/v1/player_injuries", {})
     except:
         injuries_data = {"data": []}
     
@@ -421,8 +479,8 @@ async def get_todays_betting_slate():
         }
         
         # Filter injuries for this game's teams
-        home_id = game.get("home_team_id")
-        visitor_id = game.get("visitor_team_id")
+        home_id = game.get("home_team", {}).get("id")
+        visitor_id = game.get("visitor_team", {}).get("id")
         
         for inj in injuries_data.get("data", []):
             player_team_id = inj.get("player", {}).get("team_id")
@@ -454,7 +512,7 @@ async def analyze_player_prop(
     # Get recent stats
     stats_data = await forward_to_balldontlie("/v1/stats", {
         "player_ids[]": [player_id],
-        "seasons[]": [2025],
+        "seasons[]": [2024],
         "per_page": games
     })
     
@@ -467,8 +525,8 @@ async def analyze_player_prop(
     hit_rate = (hits / len(recent_games)) * 100
     
     # Home/away split
-    home_games = [g for g in recent_games if g.get("game", {}).get("home_team_id") == player_data["data"]["team_id"]]
-    away_games = [g for g in recent_games if g.get("game", {}).get("home_team_id") != player_data["data"]["team_id"]]
+    home_games = [g for g in recent_games if g.get("game", {}).get("home_team_id") == player_data["data"]["team"]["id"]]
+    away_games = [g for g in recent_games if g.get("game", {}).get("home_team_id") != player_data["data"]["team"]["id"]]
     
     home_hits = sum(1 for g in home_games if g.get(stat, 0) >= threshold)
     away_hits = sum(1 for g in away_games if g.get(stat, 0) >= threshold)
@@ -489,7 +547,7 @@ async def analyze_player_prop(
         "recommendation": "VALUE" if hit_rate > 60 else "AVOID" if hit_rate < 40 else "NEUTRAL"
     }
 
-# === ORIGINAL ENDPOINTS (Keep for backward compatibility) ===
+# === ROOT ENDPOINT ===
 
 @app.get("/")
 async def root():
@@ -502,17 +560,21 @@ async def root():
             "BallDontLie GOAT tier relay",
             "Live betting odds (v2/odds)",
             "Advanced season averages",
-            "Real-time injury reports (FIXED)",
+            "Real-time injury reports",
             "Statistical leaders",
             "Box scores & live stats",
-            "Custom betting analytics"
+            "Custom betting analytics",
+            "ACTIVE PLAYERS filtering (inactive players excluded)"
         ],
         "balldontlie_api": "Connected (GOAT tier)",
+        "important_notes": {
+            "active_players": "Use /api/v1/players/active for current roster players only",
+            "all_players": "/api/v1/players includes inactive/retired players - use with caution"
+        },
         "endpoints": {
             "nba_v1": "/api/v1/*",
             "betting_odds_v2": "/api/v2/odds",
-            "custom_analytics": "/api/betting/*",
-            "injuries_fixed": "/api/v1/player_injuries"
+            "custom_analytics": "/api/betting/*"
         }
     }
 
@@ -531,12 +593,8 @@ async def health_check():
         "database": "connected",
         "balldontlie_api": balldontlie_status,
         "tier": "GOAT",
-        "injuries_endpoint": "FIXED - now using /v1/player_injuries",
         "timestamp": datetime.utcnow().isoformat()
     }
-
-# Keep existing analytics endpoints from original code for backward compatibility
-# (The metric-rate, season-comparison endpoints from the original main.py)
 
 if __name__ == "__main__":
     import uvicorn
