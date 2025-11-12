@@ -476,6 +476,33 @@ async def initial_data_setup(
         "games_synced": games_synced
     }
 
+@app.post("/admin/migrate-db")
+async def migrate_database():
+    """Create new GOAT tier tables (run once after deploying GOAT tier code)"""
+    from database import Base
+    from db_session import engine
+    
+    try:
+        # This line creates all the new tables
+        Base.metadata.create_all(bind=engine)
+        
+        return {
+            "status": "success",
+            "message": "GOAT tier tables created!",
+            "tables": [
+                "season_averages",
+                "team_standings",
+                "league_leaders",
+                "player_injuries",
+                "box_scores"
+            ]
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
