@@ -53,6 +53,7 @@ class DataSyncService:
         teams_data = data.get("data", [])
         
         synced = 0
+        updated = 0
         for team_data in teams_data:
             team = db.query(Team).filter(Team.id == team_data["id"]).first()
             
@@ -75,9 +76,16 @@ class DataSyncService:
                 team.division = team_data.get("division")
                 team.full_name = team_data.get("full_name")
                 team.name = team_data.get("name")
+                updated += 1
         
-        db.commit()
-        print(f"✅ Teams synced: {synced} new, {len(teams_data) - synced} updated")
+        try:
+            db.commit()
+            print(f"✅ Teams synced: {synced} new, {updated} updated")
+        except Exception as e:
+            db.rollback()
+            print(f"⚠️ Error syncing teams: {e}")
+            raise
+        
         return len(teams_data)
     
     async def sync_players(self, db: Session) -> int:
@@ -103,6 +111,7 @@ class DataSyncService:
             await asyncio.sleep(0.1)
         
         synced = 0
+        updated = 0
         for player_data in all_players:
             player = db.query(Player).filter(Player.id == player_data["id"]).first()
             
@@ -127,9 +136,16 @@ class DataSyncService:
                 player.team_id = team_data.get("id") if team_data else None
                 player.team_name = team_data.get("full_name") if team_data else None
                 player.team_abbreviation = team_data.get("abbreviation") if team_data else None
+                updated += 1
         
-        db.commit()
-        print(f"✅ Players synced: {synced} new, {len(all_players) - synced} updated")
+        try:
+            db.commit()
+            print(f"✅ Players synced: {synced} new, {updated} updated")
+        except Exception as e:
+            db.rollback()
+            print(f"⚠️ Error syncing players: {e}")
+            raise
+        
         return len(all_players)
     
     async def sync_games_for_date_range(

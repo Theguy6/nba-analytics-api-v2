@@ -693,22 +693,43 @@ async def initial_data_setup(
     db: Session = Depends(get_db)
 ):
     """Initial data setup - sync historical data"""
-    service = DataSyncService()
-    
-    start = datetime.fromisoformat(start_date).date()
-    end = datetime.fromisoformat(end_date).date() if end_date else date.today()
-    
-    await service.sync_teams(db)
-    await service.sync_players(db)
-    
-    games_synced = await service.sync_games_for_date_range(db, start, end, season)
-    
-    return {
-        "message": "Initial setup completed",
-        "season": season,
-        "date_range": f"{start} to {end}",
-        "games_synced": games_synced
-    }
+    try:
+        service = DataSyncService()
+        
+        start = datetime.fromisoformat(start_date).date()
+        end = datetime.fromisoformat(end_date).date() if end_date else date.today()
+        
+        print(f"🚀 Starting initial setup for {season} season")
+        print(f"📅 Date range: {start} to {end}")
+        
+        # Sync teams and players first
+        try:
+            teams_count = await service.sync_teams(db)
+            print(f"✅ Synced {teams_count} teams")
+        except Exception as e:
+            print(f"⚠️ Error syncing teams (may already exist): {e}")
+        
+        try:
+            players_count = await service.sync_players(db)
+            print(f"✅ Synced {players_count} players")
+        except Exception as e:
+            print(f"⚠️ Error syncing players (may already exist): {e}")
+        
+        # Sync games
+        games_synced = await service.sync_games_for_date_range(db, start, end, season)
+        
+        return {
+            "status": "success",
+            "message": "Initial setup completed",
+            "season": season,
+            "date_range": f"{start} to {end}",
+            "games_synced": games_synced
+        }
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"❌ Initial setup failed: {error_detail}")
+        raise HTTPException(status_code=500, detail=f"Setup failed: {str(e)}")
 
 @app.get("/sync/status")
 async def get_sync_status(db: Session = Depends(get_db)):
