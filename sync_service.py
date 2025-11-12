@@ -97,18 +97,31 @@ class DataSyncService:
     
     async def sync_players(self, db: Session) -> int:
         """Sync all active NBA players"""
-        print("👥 Syncing players...", flush=True)
+        print("👥 Syncing players (using Active Players endpoint)...", flush=True)
         
         try:
             all_players = []
             page = 1
-            max_pages = 10  # Safety limit: ~1000 players max (way more than needed)
             
-            # Fetch all pages
-            while page <= max_pages:
-                print(f"   Fetching players page {page}...", flush=True)
-                data = await self.fetch_api("players", {"per_page": 100, "page": page})
-                players_data = data.get("data", [])
+            # Use the Active Players endpoint (available in ALL-STAR and GOAT tiers)
+            # This returns only current active players, not historical data
+            while True:
+                print(f"   Fetching active players page {page}...", flush=True)
+                
+                # Try the active players endpoint first
+                try:
+                    data = await self.fetch_api("active_players", {"per_page": 100, "page": page})
+                    players_data = data.get("data", [])
+                    endpoint_used = "active_players"
+                except Exception as e:
+                    # Fallback to regular players endpoint with safety limit
+                    print(f"   Active players endpoint not available, using regular endpoint with limit", flush=True)
+                    if page > 10:  # Safety limit for fallback
+                        print(f"   Reached safety limit of 10 pages", flush=True)
+                        break
+                    data = await self.fetch_api("players", {"per_page": 100, "page": page})
+                    players_data = data.get("data", [])
+                    endpoint_used = "players"
                 
                 if not players_data:
                     print(f"   No more players found at page {page}", flush=True)
@@ -123,10 +136,6 @@ class DataSyncService:
                 
                 page += 1
                 await asyncio.sleep(0.1)  # Rate limiting
-            
-            if page > max_pages:
-                print(f"   ⚠️ Hit safety limit of {max_pages} pages. API may be returning historical players.", flush=True)
-                print(f"   Proceeding with first {len(all_players)} players (should be current active players)", flush=True)
             
             print(f"   Total players to process: {len(all_players)}", flush=True)
             
