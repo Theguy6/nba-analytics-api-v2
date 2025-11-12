@@ -685,6 +685,47 @@ async def trigger_goat_sync(background_tasks: BackgroundTasks, db: Session = Dep
         "syncing": ["season_averages", "team_standings", "head_to_head", "performance_streaks"]
     }
 
+@app.post("/sync/create-goat-tables")
+async def create_goat_tables(db: Session = Depends(get_db)):
+    """Manually create GOAT tier database tables"""
+    try:
+        from database import Base
+        from db_session import engine
+        
+        # This will create all tables defined in database.py that don't exist yet
+        Base.metadata.create_all(bind=engine)
+        
+        # Verify which tables exist
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        existing_tables = inspector.get_table_names()
+        
+        goat_tables = [
+            'season_averages',
+            'team_standings', 
+            'head_to_head',
+            'injury_reports',
+            'player_comparisons',
+            'game_predictions',
+            'performance_streaks'
+        ]
+        
+        created = [t for t in goat_tables if t in existing_tables]
+        missing = [t for t in goat_tables if t not in existing_tables]
+        
+        return {
+            "status": "success",
+            "message": "GOAT tier tables created",
+            "existing_tables": existing_tables,
+            "goat_tables_created": created,
+            "still_missing": missing
+        }
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"❌ Error creating tables: {error_detail}")
+        raise HTTPException(status_code=500, detail=f"Failed to create tables: {str(e)}")
+
 @app.post("/sync/initial-setup")
 async def initial_data_setup(
     season: int = Query(2024, description="Season to sync"),
