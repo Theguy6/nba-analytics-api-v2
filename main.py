@@ -1,6 +1,6 @@
 """
-NBA Analytics Backend API - Enhanced Version
-With PostgreSQL database, daily sync, and comprehensive metrics
+NBA Analytics Backend API - COMPLETE VERSION
+With PostgreSQL database, daily sync, comprehensive metrics, and GOAT tier features
 """
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Depends
@@ -9,14 +9,17 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, and_, or_, desc
 from collections import defaultdict
 
-from database import Player, Team, Game, GameStats, MetricCache
+from database import (
+    Player, Team, Game, GameStats, MetricCache, SeasonAverages, 
+    TeamStandings, HeadToHead, PerformanceStreak
+)
 from db_session import init_db, get_db
 from sync_service import DataSyncService
 
-app = FastAPI(title="NBA Analytics API - Enhanced", version="2.0.0")
+app = FastAPI(title="NBA Analytics API - GOAT Edition", version="3.0.0")
 
 # CORS middleware
 app.add_middleware(
@@ -31,7 +34,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     init_db()
-    print("✅ Database initialized")
+    print("✅ Database initialized - GOAT Edition")
 
 # === MODELS ===
 
@@ -58,7 +61,6 @@ def get_player_by_name(db: Session, player_name: str) -> Player:
     parts = player_name.strip().split()
     
     if len(parts) < 2:
-        # Try searching in both first and last name
         player = db.query(Player).filter(
             or_(
                 Player.first_name.ilike(f"%{player_name}%"),
@@ -66,7 +68,6 @@ def get_player_by_name(db: Session, player_name: str) -> Player:
             )
         ).first()
     else:
-        # Assume first part is first name, rest is last name
         first = parts[0]
         last = " ".join(parts[1:])
         
@@ -86,18 +87,13 @@ def calculate_rolling_metric(
     threshold: int,
     window_size: int = 10
 ) -> Dict[str, Any]:
-    """
-    Calculate rolling window metric for any stat
-    metric_field: 'fg3m', 'ast', 'stl', 'pts', etc.
-    threshold: minimum value to meet threshold (e.g., 3+ threes)
-    """
+    """Calculate rolling window metric for any stat"""
     if len(games) < window_size:
         return {
             "error": f"Not enough games. Need {window_size}, have {len(games)}",
             "games_played": len(games)
         }
     
-    # Sort by date
     sorted_games = sorted(games, key=lambda x: x.game.date)
     
     results = {
@@ -108,7 +104,6 @@ def calculate_rolling_metric(
         "opponent_breakdown": defaultdict(lambda: {"games": 0, "threshold_met": 0})
     }
     
-    # Analyze rolling windows
     num_windows = len(sorted_games) // window_size
     total_threshold_met = 0
     
@@ -131,7 +126,6 @@ def calculate_rolling_metric(
             value = getattr(game_stat, metric_field, 0)
             is_home = game_stat.is_home
             
-            # Get opponent
             if is_home:
                 opponent_id = game_stat.game.visitor_team_id
                 opponent = game_stat.game.visitor_team
@@ -142,13 +136,11 @@ def calculate_rolling_metric(
             opponent_abbr = opponent.abbreviation if opponent else "UNK"
             met_threshold = value >= threshold
             
-            # Track home/away
             location = "home" if is_home else "away"
             results["home_away_splits"][location]["games"] += 1
             if met_threshold:
                 results["home_away_splits"][location]["threshold_met"] += 1
             
-            # Track opponent
             results["opponent_breakdown"][opponent_abbr]["games"] += 1
             if met_threshold:
                 results["opponent_breakdown"][opponent_abbr]["threshold_met"] += 1
@@ -164,7 +156,6 @@ def calculate_rolling_metric(
         total_threshold_met += threshold_count
         results["windows_analyzed"].append(window_info)
     
-    # Calculate rates
     total_games_in_windows = num_windows * window_size
     results["overall_rate"] = round((total_threshold_met / total_games_in_windows) * 100, 1)
     
@@ -173,7 +164,6 @@ def calculate_rolling_metric(
         if split["games"] > 0:
             split["rate"] = round((split["threshold_met"] / split["games"]) * 100, 1)
     
-    # Convert opponent breakdown
     opponent_list = []
     for opp, stats in results["opponent_breakdown"].items():
         opponent_list.append({
@@ -209,22 +199,26 @@ def compare_season_stats(games_season_1: List[GameStats], games_season_2: List[G
         }
     }
 
-# === ENDPOINTS ===
+# === CORE ENDPOINTS ===
 
 @app.get("/")
 async def root():
     """API health check"""
     return {
         "status": "healthy",
-        "service": "NBA Analytics API - Enhanced",
-        "version": "2.0.0",
+        "service": "NBA Analytics API - GOAT Edition",
+        "version": "3.0.0",
         "features": [
             "PostgreSQL database",
             "Daily auto-sync",
             "Multiple metrics (3PT, assists, steals, etc.)",
-            "Team analysis",
             "Season comparisons",
-            "Home/away splits"
+            "Home/away splits",
+            "🐐 GOAT: Season averages",
+            "🐐 GOAT: Team standings",
+            "🐐 GOAT: Head-to-head matchups",
+            "🐐 GOAT: Performance streaks",
+            "🐐 GOAT: Player comparisons"
         ]
     }
 
@@ -259,21 +253,13 @@ async def search_player(
 @app.post("/analytics/metric-rate")
 async def analyze_metric_rate(
     player_name: str = Query(..., description="Player full name"),
-    metric: str = Query(..., description="Metric to analyze: 'threes', 'assists', 'steals', 'points', 'rebounds', 'blocks'"),
+    metric: str = Query(..., description="Metric: 'threes', 'assists', 'steals', 'points', 'rebounds', 'blocks'"),
     threshold: int = Query(..., description="Minimum value to meet threshold"),
     season: int = Query(2024, description="NBA season year"),
     window_size: int = Query(10, description="Game window size"),
     db: Session = Depends(get_db)
 ):
-    """
-    Universal metric rate analyzer - works for ANY stat!
-    
-    Examples:
-    - metric='threes', threshold=3: How often does player hit 3+ threes?
-    - metric='assists', threshold=5: How often does player get 5+ assists?
-    - metric='steals', threshold=2: How often does player get 2+ steals?
-    """
-    # Map metric names to database fields
+    """Universal metric rate analyzer"""
     metric_map = {
         "threes": "fg3m",
         "three_pointers": "fg3m",
@@ -287,21 +273,18 @@ async def analyze_metric_rate(
     
     metric_field = metric_map.get(metric.lower())
     if not metric_field:
-        raise HTTPException(status_code=400, detail=f"Unknown metric: {metric}. Available: {list(metric_map.keys())}")
+        raise HTTPException(status_code=400, detail=f"Unknown metric: {metric}")
     
-    # Get player
     player = get_player_by_name(db, player_name)
     
-    # Get games for season
     games = db.query(GameStats).join(Game).filter(
         GameStats.player_id == player.id,
         Game.season == season
     ).all()
     
     if not games:
-        raise HTTPException(status_code=404, detail=f"No games found for {player.full_name} in {season} season")
+        raise HTTPException(status_code=404, detail=f"No games found for {player.full_name} in {season}")
     
-    # Calculate metric
     analytics = calculate_rolling_metric(games, metric_field, threshold, window_size)
     
     return {
@@ -315,23 +298,18 @@ async def analyze_metric_rate(
 @app.get("/analytics/season-comparison")
 async def compare_seasons(
     player_name: str = Query(..., description="Player name"),
-    stat: str = Query(..., description="Stat to compare: 'fga', 'fg3a', 'minutes', 'pts', 'ast'"),
+    stat: str = Query(..., description="Stat: 'fga', 'fg3a', 'minutes', 'pts', 'ast'"),
     season_1: int = Query(2023, description="First season"),
     season_2: int = Query(2024, description="Second season"),
     db: Session = Depends(get_db)
 ):
-    """
-    Compare a player's stats across two seasons
-    Answers: "Does player have higher FGA/3PA this year vs last year?"
-    """
-    # Validate stat field
+    """Compare player stats across two seasons"""
     valid_stats = ['fga', 'fg3a', 'fgm', 'fg3m', 'pts', 'ast', 'reb', 'stl', 'blk', 'minutes']
     if stat not in valid_stats:
         raise HTTPException(status_code=400, detail=f"Invalid stat. Choose from: {valid_stats}")
     
     player = get_player_by_name(db, player_name)
     
-    # Get games for both seasons
     games_s1 = db.query(GameStats).join(Game).filter(
         GameStats.player_id == player.id,
         Game.season == season_1
@@ -349,7 +327,6 @@ async def compare_seasons(
     
     comparison = compare_season_stats(games_s1, games_s2, stat)
     
-    # Calculate difference
     avg_1 = comparison["season_1"][f"avg_{stat}"]
     avg_2 = comparison["season_2"][f"avg_{stat}"]
     difference = round(avg_2 - avg_1, 2)
@@ -371,15 +348,12 @@ async def get_player_stats(
     player_name: str = Query(..., description="Player name"),
     season: int = Query(2024, description="Season"),
     home_away: Optional[str] = Query(None, description="Filter: 'home' or 'away'"),
-    opponent: Optional[str] = Query(None, description="Filter by opponent team abbreviation"),
+    opponent: Optional[str] = Query(None, description="Filter by opponent abbreviation"),
     db: Session = Depends(get_db)
 ):
-    """
-    Get detailed player statistics with optional filters
-    """
+    """Get detailed player statistics with filters"""
     player = get_player_by_name(db, player_name)
     
-    # Build query
     query = db.query(GameStats).join(Game).filter(
         GameStats.player_id == player.id,
         Game.season == season
@@ -390,7 +364,6 @@ async def get_player_stats(
         query = query.filter(GameStats.is_home == is_home)
     
     if opponent:
-        # Join with teams to filter by opponent
         query = query.join(Team, or_(
             Game.home_team_id == Team.id,
             Game.visitor_team_id == Team.id
@@ -407,7 +380,6 @@ async def get_player_stats(
     if not games:
         return {"error": "No games found with specified filters"}
     
-    # Calculate averages
     total_games = len(games)
     
     averages = {
@@ -434,6 +406,252 @@ async def get_player_stats(
         "statistics": averages
     }
 
+# === GOAT TIER ENDPOINTS ===
+
+@app.get("/analytics/season-averages/{player_name}")
+async def get_season_averages(
+    player_name: str,
+    season: int = Query(2024, description="Season"),
+    db: Session = Depends(get_db)
+):
+    """🐐 Get pre-calculated season averages for a player"""
+    player = get_player_by_name(db, player_name)
+    
+    averages = db.query(SeasonAverages).filter(
+        SeasonAverages.player_id == player.id,
+        SeasonAverages.season == season
+    ).first()
+    
+    if not averages:
+        raise HTTPException(status_code=404, detail=f"No season averages found for {player.full_name} in {season}")
+    
+    return {
+        "player": player.full_name,
+        "season": season,
+        "games_played": averages.games_played,
+        "scoring": {
+            "ppg": round(averages.avg_pts, 1),
+            "fg_pct": round(averages.avg_fg_pct * 100, 1) if averages.avg_fg_pct else 0,
+            "fg3_pct": round(averages.avg_fg3_pct * 100, 1) if averages.avg_fg3_pct else 0,
+            "ft_pct": round(averages.avg_ft_pct * 100, 1) if averages.avg_ft_pct else 0,
+            "fga": round(averages.avg_fga, 1),
+            "fg3a": round(averages.avg_fg3a, 1)
+        },
+        "other": {
+            "apg": round(averages.avg_ast, 1),
+            "rpg": round(averages.avg_reb, 1),
+            "spg": round(averages.avg_stl, 1),
+            "bpg": round(averages.avg_blk, 1),
+            "topg": round(averages.avg_turnover, 1)
+        },
+        "efficiency": {
+            "ts_pct": round(averages.true_shooting_pct * 100, 1) if averages.true_shooting_pct else 0,
+            "efg_pct": round(averages.effective_fg_pct * 100, 1) if averages.effective_fg_pct else 0,
+            "usage_rate": round(averages.usage_rate * 100, 1) if averages.usage_rate else 0
+        },
+        "last_updated": averages.last_updated.isoformat()
+    }
+
+@app.get("/analytics/team-standings")
+async def get_team_standings(
+    season: int = Query(2024, description="Season"),
+    conference: Optional[str] = Query(None, description="East or West"),
+    db: Session = Depends(get_db)
+):
+    """🐐 Get team standings for a season"""
+    query = db.query(TeamStandings).join(Team).filter(
+        TeamStandings.season == season
+    )
+    
+    if conference:
+        query = query.filter(Team.conference.ilike(f"%{conference}%"))
+    
+    standings = query.order_by(desc(TeamStandings.win_pct)).all()
+    
+    if not standings:
+        raise HTTPException(status_code=404, detail=f"No standings found for {season} season")
+    
+    results = []
+    for idx, standing in enumerate(standings, 1):
+        results.append({
+            "rank": idx,
+            "team": standing.team.full_name,
+            "abbreviation": standing.team.abbreviation,
+            "wins": standing.wins,
+            "losses": standing.losses,
+            "win_pct": round(standing.win_pct * 100, 1),
+            "home_record": f"{standing.home_wins}-{standing.home_losses}",
+            "away_record": f"{standing.away_wins}-{standing.away_losses}",
+            "streak": standing.current_streak,
+            "ppg": round(standing.avg_points_scored, 1),
+            "opp_ppg": round(standing.avg_points_allowed, 1),
+            "conference_rank": standing.conference_rank,
+            "division_rank": standing.division_rank
+        })
+    
+    return {
+        "season": season,
+        "conference": conference or "All",
+        "standings": results
+    }
+
+@app.get("/analytics/head-to-head")
+async def get_head_to_head(
+    team1: str = Query(..., description="First team abbreviation"),
+    team2: str = Query(..., description="Second team abbreviation"),
+    season: int = Query(2024, description="Season"),
+    db: Session = Depends(get_db)
+):
+    """🐐 Get head-to-head matchup data"""
+    t1 = db.query(Team).filter(Team.abbreviation.ilike(team1)).first()
+    t2 = db.query(Team).filter(Team.abbreviation.ilike(team2)).first()
+    
+    if not t1 or not t2:
+        raise HTTPException(status_code=404, detail="One or both teams not found")
+    
+    h2h = db.query(HeadToHead).filter(
+        or_(
+            and_(HeadToHead.team_1_id == t1.id, HeadToHead.team_2_id == t2.id),
+            and_(HeadToHead.team_1_id == t2.id, HeadToHead.team_2_id == t1.id)
+        ),
+        HeadToHead.season == season
+    ).first()
+    
+    if not h2h:
+        raise HTTPException(status_code=404, detail="No head-to-head data found")
+    
+    # Determine which team is which in the stored data
+    if h2h.team_1_id == t1.id:
+        team1_wins = h2h.team_1_wins
+        team2_wins = h2h.team_2_wins
+        team1_avg = h2h.team_1_avg_score
+        team2_avg = h2h.team_2_avg_score
+    else:
+        team1_wins = h2h.team_2_wins
+        team2_wins = h2h.team_1_wins
+        team1_avg = h2h.team_2_avg_score
+        team2_avg = h2h.team_1_avg_score
+    
+    return {
+        "season": season,
+        "matchup": f"{t1.full_name} vs {t2.full_name}",
+        "series": {
+            t1.abbreviation: team1_wins,
+            t2.abbreviation: team2_wins
+        },
+        "scoring_avg": {
+            t1.abbreviation: round(team1_avg, 1),
+            t2.abbreviation: round(team2_avg, 1)
+        },
+        "last_game": {
+            "date": h2h.last_game_date.isoformat() if h2h.last_game_date else None,
+            "score": h2h.last_game_score
+        }
+    }
+
+@app.get("/analytics/player-streaks/{player_name}")
+async def get_player_streaks(
+    player_name: str,
+    season: int = Query(2024, description="Season"),
+    active_only: bool = Query(True, description="Show only active streaks"),
+    db: Session = Depends(get_db)
+):
+    """🐐 Get hot/cold performance streaks for a player"""
+    player = get_player_by_name(db, player_name)
+    
+    query = db.query(PerformanceStreak).filter(
+        PerformanceStreak.player_id == player.id,
+        PerformanceStreak.season == season
+    )
+    
+    if active_only:
+        query = query.filter(PerformanceStreak.is_active == True)
+    
+    streaks = query.all()
+    
+    if not streaks:
+        return {
+            "player": player.full_name,
+            "season": season,
+            "message": "No active streaks found"
+        }
+    
+    results = []
+    for streak in streaks:
+        results.append({
+            "metric": streak.metric,
+            "type": streak.streak_type,
+            "current_streak": streak.current_streak,
+            "streak_start": streak.streak_start_date.isoformat(),
+            "best_performance": round(streak.best_performance, 1),
+            "avg_performance": round(streak.avg_performance, 1),
+            "threshold": round(streak.threshold, 1),
+            "is_active": streak.is_active
+        })
+    
+    return {
+        "player": player.full_name,
+        "season": season,
+        "streaks": results
+    }
+
+@app.get("/analytics/compare-players")
+async def compare_players(
+    player1: str = Query(..., description="First player name"),
+    player2: str = Query(..., description="Second player name"),
+    season: int = Query(2024, description="Season"),
+    db: Session = Depends(get_db)
+):
+    """🐐 Compare two players' season averages"""
+    p1 = get_player_by_name(db, player1)
+    p2 = get_player_by_name(db, player2)
+    
+    avgs1 = db.query(SeasonAverages).filter(
+        SeasonAverages.player_id == p1.id,
+        SeasonAverages.season == season
+    ).first()
+    
+    avgs2 = db.query(SeasonAverages).filter(
+        SeasonAverages.player_id == p2.id,
+        SeasonAverages.season == season
+    ).first()
+    
+    if not avgs1 or not avgs2:
+        raise HTTPException(status_code=404, detail="Season averages not found for one or both players")
+    
+    comparison = {
+        "season": season,
+        "player1": {
+            "name": p1.full_name,
+            "ppg": round(avgs1.avg_pts, 1),
+            "apg": round(avgs1.avg_ast, 1),
+            "rpg": round(avgs1.avg_reb, 1),
+            "fg_pct": round(avgs1.avg_fg_pct * 100, 1) if avgs1.avg_fg_pct else 0,
+            "fg3_pct": round(avgs1.avg_fg3_pct * 100, 1) if avgs1.avg_fg3_pct else 0,
+            "ts_pct": round(avgs1.true_shooting_pct * 100, 1) if avgs1.true_shooting_pct else 0
+        },
+        "player2": {
+            "name": p2.full_name,
+            "ppg": round(avgs2.avg_pts, 1),
+            "apg": round(avgs2.avg_ast, 1),
+            "rpg": round(avgs2.avg_reb, 1),
+            "fg_pct": round(avgs2.avg_fg_pct * 100, 1) if avgs2.avg_fg_pct else 0,
+            "fg3_pct": round(avgs2.avg_fg3_pct * 100, 1) if avgs2.avg_fg3_pct else 0,
+            "ts_pct": round(avgs2.true_shooting_pct * 100, 1) if avgs2.true_shooting_pct else 0
+        },
+        "winner": {}
+    }
+    
+    # Determine winners
+    comparison["winner"]["scoring"] = p1.full_name if avgs1.avg_pts > avgs2.avg_pts else p2.full_name
+    comparison["winner"]["assists"] = p1.full_name if avgs1.avg_ast > avgs2.avg_ast else p2.full_name
+    comparison["winner"]["rebounds"] = p1.full_name if avgs1.avg_reb > avgs2.avg_reb else p2.full_name
+    comparison["winner"]["efficiency"] = p1.full_name if (avgs1.true_shooting_pct or 0) > (avgs2.true_shooting_pct or 0) else p2.full_name
+    
+    return comparison
+
+# === SYNC ENDPOINTS ===
+
 @app.post("/sync/daily")
 async def trigger_daily_sync(background_tasks: BackgroundTasks):
     """Manually trigger daily data sync"""
@@ -446,27 +664,43 @@ async def trigger_daily_sync(background_tasks: BackgroundTasks):
         "status": "running"
     }
 
+@app.post("/sync/goat-daily")
+async def trigger_goat_sync(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """🐐 Trigger daily GOAT tier data sync"""
+    service = DataSyncService()
+    
+    async def run_goat_sync():
+        season = 2024
+        await service.sync_season_averages(db, season)
+        await service.sync_team_standings(db, season)
+        await service.sync_head_to_head(db, season)
+        await service.detect_performance_streaks(db, season)
+        print("✅ GOAT tier sync completed!")
+    
+    background_tasks.add_task(run_goat_sync)
+    
+    return {
+        "message": "GOAT tier sync started",
+        "status": "running",
+        "syncing": ["season_averages", "team_standings", "head_to_head", "performance_streaks"]
+    }
+
 @app.post("/sync/initial-setup")
 async def initial_data_setup(
     season: int = Query(2024, description="Season to sync"),
     start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
-    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD, defaults to today)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     db: Session = Depends(get_db)
 ):
-    """
-    Initial data setup - sync historical data for a season
-    Run this once when first setting up the system
-    """
+    """Initial data setup - sync historical data"""
     service = DataSyncService()
     
     start = datetime.fromisoformat(start_date).date()
     end = datetime.fromisoformat(end_date).date() if end_date else date.today()
     
-    # Sync teams and players first
     await service.sync_teams(db)
     await service.sync_players(db)
     
-    # Sync games
     games_synced = await service.sync_games_for_date_range(db, start, end, season)
     
     return {
@@ -476,32 +710,25 @@ async def initial_data_setup(
         "games_synced": games_synced
     }
 
-@app.post("/admin/migrate-db")
-async def migrate_database():
-    """Create new GOAT tier tables (run once after deploying GOAT tier code)"""
-    from database import Base
-    from db_session import engine
+@app.get("/sync/status")
+async def get_sync_status(db: Session = Depends(get_db)):
+    """Get recent sync status"""
+    from database import SyncLog
     
-    try:
-        # This line creates all the new tables
-        Base.metadata.create_all(bind=engine)
-        
-        return {
-            "status": "success",
-            "message": "GOAT tier tables created!",
-            "tables": [
-                "season_averages",
-                "team_standings",
-                "league_leaders",
-                "player_injuries",
-                "box_scores"
-            ]
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+    recent_syncs = db.query(SyncLog).order_by(desc(SyncLog.sync_date)).limit(10).all()
+    
+    return {
+        "recent_syncs": [
+            {
+                "date": sync.sync_date.isoformat(),
+                "season": sync.season,
+                "games_synced": sync.games_synced,
+                "status": sync.status,
+                "error": sync.error_message
+            }
+            for sync in recent_syncs
+        ]
+    }
 
 if __name__ == "__main__":
     import uvicorn
