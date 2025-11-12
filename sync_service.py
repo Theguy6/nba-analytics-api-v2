@@ -106,36 +106,56 @@ class DataSyncService:
         return len(teams_data)
     
     async def sync_players(self, db: Session) -> int:
-        """Sync all active NBA players"""
+        """Sync all active NBA players using cursor-based pagination"""
         print("👥 Syncing players...")
         
         all_players = []
-        page = 1
+        cursor = None
+        pages_fetched = 0
+        max_pages = 100  # Safety limit
         
-        while True:
+        while pages_fetched < max_pages:
             try:
-                data = await self.fetch_api("players", {"per_page": 100, "page": page})
+                params = {"per_page": 100}
+                if cursor:
+                    params["cursor"] = cursor
+                
+                print(f"   Fetching players (cursor: {cursor or 'initial'})...")
+                data = await self.fetch_api("players", params)
                 players_data = data.get("data", [])
+                meta = data.get("meta", {})
                 
                 if not players_data:
+                    print(f"   No more players found")
                     break
                 
                 all_players.extend(players_data)
+                pages_fetched += 1
+                print(f"   ✓ Got {len(players_data)} players (total: {len(all_players)})")
                 
-                if len(players_data) < 100:
+                # Check if there's a next page
+                next_cursor = meta.get("next_cursor")
+                if not next_cursor:
+                    print(f"   Last page reached (no next_cursor)")
                     break
                 
-                page += 1
-                await asyncio.sleep(0.1)
+                cursor = next_cursor
+                await asyncio.sleep(0.6)  # Respect rate limits (5 requests/min for free tier)
+                
             except Exception as e:
-                print(f"⚠️ Error fetching players page {page}: {e}")
+                print(f"⚠️ Error fetching players at cursor {cursor}: {e}")
+                if pages_fetched == 0:
+                    # If first page fails, abort
+                    raise
                 break
+        
+        print(f"📊 Total players fetched: {len(all_players)} in {pages_fetched} pages")
         
         synced = 0
         updated = 0
         errors = 0
         
-        for player_data in all_players:
+        for idx, player_data in enumerate(all_players, 1):
             try:
                 player = db.query(Player).filter(Player.id == player_data["id"]).first()
                 
@@ -162,14 +182,15 @@ class DataSyncService:
                     player.team_abbreviation = team_data.get("abbreviation") if team_data else None
                     updated += 1
                 
-                # Commit in batches of 100 to avoid memory issues
-                if (synced + updated) % 100 == 0:
+                # Commit in batches of 50
+                if (synced + updated) % 50 == 0:
                     db.commit()
+                    print(f"   💾 Saved batch: {synced + updated}/{len(all_players)} players")
                     
             except Exception as e:
                 db.rollback()
                 errors += 1
-                if errors < 5:  # Only log first few errors
+                if errors <= 3:
                     print(f"⚠️ Error with player {player_data.get('first_name', '')} {player_data.get('last_name', '')}: {e}")
                 continue
         
@@ -190,75 +211,98 @@ class DataSyncService:
         end_date: date,
         season: int
     ) -> int:
-        """Sync games and stats for a date range"""
+        """Sync games and stats for a date range using cursor-based pagination"""
         print(f"📅 Syncing games from {start_date} to {end_date}...")
         
         all_stats = []
-        current_date = start_date
+        cursor = None
+        pages_fetched = 0
+        max_pages = 1000  # Safety limit for large date ranges
         
-        while current_date <= end_date:
-            page = 1
-            while True:
-                params = {
-                    "dates[]": current_date.isoformat(),
-                    "per_page": 100,
-                    "page": page
-                }
+        # Use start_date and end_date parameters instead of iterating by day
+        params = {
+            "per_page": 100,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat()
+        }
+        
+        print(f"   Fetching stats for date range {start_date} to {end_date}...")
+        
+        while pages_fetched < max_pages:
+            try:
+                if cursor:
+                    params["cursor"] = cursor
                 
-                try:
-                    data = await self.fetch_api("stats", params)
-                    stats_data = data.get("data", [])
-                    
-                    if not stats_data:
-                        break
-                    
-                    all_stats.extend(stats_data)
-                    
-                    if len(stats_data) < 100:
-                        break
-                    
-                    page += 1
-                    await asyncio.sleep(0.1)
+                print(f"   Fetching stats page {pages_fetched + 1} (cursor: {cursor or 'initial'})...")
+                data = await self.fetch_api("stats", params)
+                stats_data = data.get("data", [])
+                meta = data.get("meta", {})
                 
-                except Exception as e:
-                    print(f"⚠️  Error fetching stats for {current_date}: {e}")
+                if not stats_data:
+                    print(f"   No more stats found")
                     break
-            
-            current_date += timedelta(days=1)
-            await asyncio.sleep(0.1)
+                
+                all_stats.extend(stats_data)
+                pages_fetched += 1
+                print(f"   ✓ Got {len(stats_data)} stats (total: {len(all_stats)})")
+                
+                # Check for next page
+                next_cursor = meta.get("next_cursor")
+                if not next_cursor:
+                    print(f"   Last page reached")
+                    break
+                
+                cursor = next_cursor
+                await asyncio.sleep(0.6)  # Rate limiting for free tier
+                
+            except Exception as e:
+                print(f"⚠️  Error fetching stats at cursor {cursor}: {e}")
+                break
         
+        print(f"📊 Total stats fetched: {len(all_stats)} in {pages_fetched} pages")
+        
+        # Process and store stats
         games_synced = 0
         stats_synced = 0
+        games_seen = set()
         
         for stat in all_stats:
             game_data = stat.get("game", {})
             player_data = stat.get("player", {})
             team_data = stat.get("team", {})
             
-            game = db.query(Game).filter(Game.id == game_data["id"]).first()
-            if not game:
-                game = Game(
-                    id=game_data["id"],
-                    date=datetime.fromisoformat(game_data["date"].replace('Z', '+00:00')).date(),
-                    season=game_data.get("season", season),
-                    status=game_data.get("status"),
-                    home_team_id=game_data.get("home_team_id"),
-                    visitor_team_id=game_data.get("visitor_team_id"),
-                    home_team_score=game_data.get("home_team_score"),
-                    visitor_team_score=game_data.get("visitor_team_score")
-                )
-                db.add(game)
-                games_synced += 1
+            game_id = game_data.get("id")
+            if not game_id:
+                continue
             
+            # Ensure game exists (only create once per game)
+            if game_id not in games_seen:
+                game = db.query(Game).filter(Game.id == game_id).first()
+                if not game:
+                    game = Game(
+                        id=game_id,
+                        date=datetime.fromisoformat(game_data["date"]).date() if isinstance(game_data.get("date"), str) else game_data.get("date"),
+                        season=game_data.get("season", season),
+                        status=game_data.get("status"),
+                        home_team_id=game_data.get("home_team_id"),
+                        visitor_team_id=game_data.get("visitor_team_id"),
+                        home_team_score=game_data.get("home_team_score"),
+                        visitor_team_score=game_data.get("visitor_team_score")
+                    )
+                    db.add(game)
+                    games_synced += 1
+                games_seen.add(game_id)
+            
+            # Check if stat already exists
             existing_stat = db.query(GameStats).filter(
-                GameStats.player_id == player_data["id"],
-                GameStats.game_id == game_data["id"]
+                GameStats.player_id == player_data.get("id"),
+                GameStats.game_id == game_id
             ).first()
             
             if not existing_stat:
                 game_stat = GameStats(
-                    player_id=player_data["id"],
-                    game_id=game_data["id"],
+                    player_id=player_data.get("id"),
+                    game_id=game_id,
                     team_id=team_data.get("id"),
                     is_home=game_data.get("home_team_id") == team_data.get("id"),
                     minutes=stat.get("min"),
@@ -283,6 +327,11 @@ class DataSyncService:
                 )
                 db.add(game_stat)
                 stats_synced += 1
+            
+            # Commit in batches
+            if (games_synced + stats_synced) % 500 == 0:
+                db.commit()
+                print(f"   💾 Saved batch: {games_synced} games, {stats_synced} stats")
         
         db.commit()
         print(f"✅ Synced {games_synced} games, {stats_synced} player stats")
