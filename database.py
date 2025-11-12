@@ -210,8 +210,8 @@ class PlayerInjury(Base):
     player = relationship("Player", back_populates="injuries")
     
     __table_args__ = (
-        Index('idx_injury_player', 'player_id'),
-        Index('idx_injury_status', 'status'),
+        Index('idx_player_injuries_player_id', 'player_id'),
+        Index('idx_player_injuries_status', 'status'),
     )
 
 class BettingOdds(Base):
