@@ -54,36 +54,53 @@ class DataSyncService:
         
         synced = 0
         updated = 0
+        skipped = 0
+        
         for team_data in teams_data:
-            team = db.query(Team).filter(Team.id == team_data["id"]).first()
-            
-            if not team:
-                team = Team(
-                    id=team_data["id"],
-                    abbreviation=team_data["abbreviation"],
-                    city=team_data.get("city"),
-                    conference=team_data.get("conference"),
-                    division=team_data.get("division"),
-                    full_name=team_data.get("full_name"),
-                    name=team_data.get("name")
-                )
-                db.add(team)
-                synced += 1
-            else:
-                team.abbreviation = team_data["abbreviation"]
-                team.city = team_data.get("city")
-                team.conference = team_data.get("conference")
-                team.division = team_data.get("division")
-                team.full_name = team_data.get("full_name")
-                team.name = team_data.get("name")
-                updated += 1
+            try:
+                team = db.query(Team).filter(Team.id == team_data["id"]).first()
+                
+                if not team:
+                    # Check if abbreviation already exists (historical team issue)
+                    existing_abbr = db.query(Team).filter(Team.abbreviation == team_data["abbreviation"]).first()
+                    if existing_abbr:
+                        print(f"⚠️ Skipping team {team_data['abbreviation']} (ID {team_data['id']}) - abbreviation already exists for ID {existing_abbr.id}")
+                        skipped += 1
+                        continue
+                    
+                    team = Team(
+                        id=team_data["id"],
+                        abbreviation=team_data["abbreviation"],
+                        city=team_data.get("city"),
+                        conference=team_data.get("conference"),
+                        division=team_data.get("division"),
+                        full_name=team_data.get("full_name"),
+                        name=team_data.get("name")
+                    )
+                    db.add(team)
+                    synced += 1
+                else:
+                    team.abbreviation = team_data["abbreviation"]
+                    team.city = team_data.get("city")
+                    team.conference = team_data.get("conference")
+                    team.division = team_data.get("division")
+                    team.full_name = team_data.get("full_name")
+                    team.name = team_data.get("name")
+                    updated += 1
+                
+                db.flush()  # Flush after each team to catch errors early
+                
+            except Exception as e:
+                db.rollback()
+                print(f"⚠️ Error with team {team_data.get('abbreviation', 'UNKNOWN')}: {e}")
+                continue
         
         try:
             db.commit()
-            print(f"✅ Teams synced: {synced} new, {updated} updated")
+            print(f"✅ Teams synced: {synced} new, {updated} updated, {skipped} skipped")
         except Exception as e:
             db.rollback()
-            print(f"⚠️ Error syncing teams: {e}")
+            print(f"⚠️ Error committing teams: {e}")
             raise
         
         return len(teams_data)
@@ -96,54 +113,72 @@ class DataSyncService:
         page = 1
         
         while True:
-            data = await self.fetch_api("players", {"per_page": 100, "page": page})
-            players_data = data.get("data", [])
-            
-            if not players_data:
+            try:
+                data = await self.fetch_api("players", {"per_page": 100, "page": page})
+                players_data = data.get("data", [])
+                
+                if not players_data:
+                    break
+                
+                all_players.extend(players_data)
+                
+                if len(players_data) < 100:
+                    break
+                
+                page += 1
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                print(f"⚠️ Error fetching players page {page}: {e}")
                 break
-            
-            all_players.extend(players_data)
-            
-            if len(players_data) < 100:
-                break
-            
-            page += 1
-            await asyncio.sleep(0.1)
         
         synced = 0
         updated = 0
+        errors = 0
+        
         for player_data in all_players:
-            player = db.query(Player).filter(Player.id == player_data["id"]).first()
-            
-            team_data = player_data.get("team", {})
-            
-            if not player:
-                player = Player(
-                    id=player_data["id"],
-                    first_name=player_data["first_name"],
-                    last_name=player_data["last_name"],
-                    position=player_data.get("position"),
-                    team_id=team_data.get("id") if team_data else None,
-                    team_name=team_data.get("full_name") if team_data else None,
-                    team_abbreviation=team_data.get("abbreviation") if team_data else None
-                )
-                db.add(player)
-                synced += 1
-            else:
-                player.first_name = player_data["first_name"]
-                player.last_name = player_data["last_name"]
-                player.position = player_data.get("position")
-                player.team_id = team_data.get("id") if team_data else None
-                player.team_name = team_data.get("full_name") if team_data else None
-                player.team_abbreviation = team_data.get("abbreviation") if team_data else None
-                updated += 1
+            try:
+                player = db.query(Player).filter(Player.id == player_data["id"]).first()
+                
+                team_data = player_data.get("team", {})
+                
+                if not player:
+                    player = Player(
+                        id=player_data["id"],
+                        first_name=player_data["first_name"],
+                        last_name=player_data["last_name"],
+                        position=player_data.get("position"),
+                        team_id=team_data.get("id") if team_data else None,
+                        team_name=team_data.get("full_name") if team_data else None,
+                        team_abbreviation=team_data.get("abbreviation") if team_data else None
+                    )
+                    db.add(player)
+                    synced += 1
+                else:
+                    player.first_name = player_data["first_name"]
+                    player.last_name = player_data["last_name"]
+                    player.position = player_data.get("position")
+                    player.team_id = team_data.get("id") if team_data else None
+                    player.team_name = team_data.get("full_name") if team_data else None
+                    player.team_abbreviation = team_data.get("abbreviation") if team_data else None
+                    updated += 1
+                
+                # Commit in batches of 100 to avoid memory issues
+                if (synced + updated) % 100 == 0:
+                    db.commit()
+                    
+            except Exception as e:
+                db.rollback()
+                errors += 1
+                if errors < 5:  # Only log first few errors
+                    print(f"⚠️ Error with player {player_data.get('first_name', '')} {player_data.get('last_name', '')}: {e}")
+                continue
         
         try:
             db.commit()
-            print(f"✅ Players synced: {synced} new, {updated} updated")
+            print(f"✅ Players synced: {synced} new, {updated} updated" + (f", {errors} errors" if errors > 0 else ""))
         except Exception as e:
             db.rollback()
-            print(f"⚠️ Error syncing players: {e}")
+            print(f"⚠️ Error committing players: {e}")
             raise
         
         return len(all_players)
