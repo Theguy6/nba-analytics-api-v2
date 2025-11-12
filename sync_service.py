@@ -1,7 +1,7 @@
 """
-Data Synchronization Service - COMPLETE VERSION
-Fetches data from Balldontlie API and stores in database
-Includes GOAT tier sync functions for season averages, standings, etc.
+Data Synchronization Service - GOAT TIER Edition
+Fetches data from Balldontlie API with cursor-based pagination and GOAT tier features
+Includes: Advanced stats, injuries, betting odds, active players
 """
 
 import httpx
@@ -10,13 +10,8 @@ from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional
 import os
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
-from collections import defaultdict
 
-from database import (
-    Player, Team, Game, GameStats, SyncLog, 
-    SeasonAverages, TeamStandings, HeadToHead, PerformanceStreak
-)
+from database import Player, Team, Game, GameStats, AdvancedStats, PlayerInjury, BettingOdds, SyncLog
 from db_session import get_db_context
 
 BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY")
@@ -24,7 +19,7 @@ BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
 
 
 class DataSyncService:
-    """Service for syncing NBA data from Balldontlie API to database"""
+    """Service for syncing NBA data from Balldontlie API to database - GOAT Edition"""
     
     def __init__(self, api_key: str = None):
         self.api_key = api_key or BALLDONTLIE_API_KEY
@@ -41,167 +36,142 @@ class DataSyncService:
             response.raise_for_status()
             return response.json()
     
-    # ========================================================================
-    # CORE SYNC FUNCTIONS
-    # ========================================================================
-    
     async def sync_teams(self, db: Session) -> int:
-        """Sync all NBA teams"""
+        """Sync all NBA teams using cursor pagination"""
         print("🏀 Syncing teams...")
         
-        data = await self.fetch_api("teams")
-        teams_data = data.get("data", [])
+        all_teams = []
+        cursor = None
+        
+        while True:
+            params = {"per_page": 100}
+            if cursor:
+                params["cursor"] = cursor
+            
+            data = await self.fetch_api("teams", params)
+            teams_data = data.get("data", [])
+            
+            if not teams_data:
+                break
+            
+            all_teams.extend(teams_data)
+            
+            # Get next cursor
+            meta = data.get("meta", {})
+            cursor = meta.get("next_cursor")
+            
+            if not cursor:
+                break
+            
+            await asyncio.sleep(0.1)
         
         synced = 0
         updated = 0
         skipped = 0
         
-        for team_data in teams_data:
-            try:
-                team = db.query(Team).filter(Team.id == team_data["id"]).first()
+        for team_data in all_teams:
+            # Find by ID (not abbreviation to avoid conflicts)
+            team = db.query(Team).filter(Team.id == team_data["id"]).first()
+            
+            if not team:
+                # Check if abbreviation exists with different ID
+                existing_abbr = db.query(Team).filter(
+                    Team.abbreviation == team_data["abbreviation"],
+                    Team.id != team_data["id"]
+                ).first()
                 
-                if not team:
-                    # Check if abbreviation already exists (historical team issue)
-                    existing_abbr = db.query(Team).filter(Team.abbreviation == team_data["abbreviation"]).first()
-                    if existing_abbr:
-                        print(f"⚠️ Skipping team {team_data['abbreviation']} (ID {team_data['id']}) - abbreviation already exists for ID {existing_abbr.id}")
-                        skipped += 1
-                        continue
-                    
-                    team = Team(
-                        id=team_data["id"],
-                        abbreviation=team_data["abbreviation"],
-                        city=team_data.get("city"),
-                        conference=team_data.get("conference"),
-                        division=team_data.get("division"),
-                        full_name=team_data.get("full_name"),
-                        name=team_data.get("name")
-                    )
-                    db.add(team)
-                    synced += 1
-                else:
-                    team.abbreviation = team_data["abbreviation"]
-                    team.city = team_data.get("city")
-                    team.conference = team_data.get("conference")
-                    team.division = team_data.get("division")
-                    team.full_name = team_data.get("full_name")
-                    team.name = team_data.get("name")
-                    updated += 1
+                if existing_abbr:
+                    print(f"⚠️ Skipping team {team_data['abbreviation']} (ID {team_data['id']}) - abbreviation already exists for ID {existing_abbr.id}")
+                    skipped += 1
+                    continue
                 
-                db.flush()  # Flush after each team to catch errors early
-                
-            except Exception as e:
-                db.rollback()
-                print(f"⚠️ Error with team {team_data.get('abbreviation', 'UNKNOWN')}: {e}")
-                continue
+                team = Team(
+                    id=team_data["id"],
+                    abbreviation=team_data["abbreviation"],
+                    city=team_data.get("city"),
+                    conference=team_data.get("conference"),
+                    division=team_data.get("division"),
+                    full_name=team_data.get("full_name"),
+                    name=team_data.get("name")
+                )
+                db.add(team)
+                synced += 1
+            else:
+                # Update existing team
+                team.abbreviation = team_data["abbreviation"]
+                team.city = team_data.get("city")
+                team.conference = team_data.get("conference")
+                team.division = team_data.get("division")
+                team.full_name = team_data.get("full_name")
+                team.name = team_data.get("name")
+                updated += 1
         
-        try:
-            db.commit()
-            print(f"✅ Teams synced: {synced} new, {updated} updated, {skipped} skipped")
-        except Exception as e:
-            db.rollback()
-            print(f"⚠️ Error committing teams: {e}")
-            raise
-        
-        return len(teams_data)
+        db.commit()
+        print(f"✅ Teams synced: {synced} new, {updated} updated, {skipped} skipped")
+        return len(all_teams)
     
     async def sync_players(self, db: Session) -> int:
-        """Sync all active NBA players using cursor-based pagination"""
+        """Sync all ACTIVE NBA players using cursor pagination (GOAT tier feature)"""
         print("👥 Syncing players...")
         
         all_players = []
         cursor = None
-        pages_fetched = 0
-        max_pages = 100  # Safety limit
         
-        while pages_fetched < max_pages:
-            try:
-                params = {"per_page": 100}
-                if cursor:
-                    params["cursor"] = cursor
-                
-                print(f"   Fetching players (cursor: {cursor or 'initial'})...")
-                data = await self.fetch_api("players", params)
-                players_data = data.get("data", [])
-                meta = data.get("meta", {})
-                
-                if not players_data:
-                    print(f"   No more players found")
-                    break
-                
-                all_players.extend(players_data)
-                pages_fetched += 1
-                print(f"   ✓ Got {len(players_data)} players (total: {len(all_players)})")
-                
-                # Check if there's a next page
-                next_cursor = meta.get("next_cursor")
-                if not next_cursor:
-                    print(f"   Last page reached (no next_cursor)")
-                    break
-                
-                cursor = next_cursor
-                await asyncio.sleep(0.6)  # Respect rate limits (5 requests/min for free tier)
-                
-            except Exception as e:
-                print(f"⚠️ Error fetching players at cursor {cursor}: {e}")
-                if pages_fetched == 0:
-                    # If first page fails, abort
-                    raise
+        while True:
+            params = {"per_page": 100}
+            if cursor:
+                params["cursor"] = cursor
+            
+            print(f"   Fetching players (cursor: {cursor or 'initial'})...")
+            
+            # GOAT tier: Use /players/active endpoint for current rosters only
+            data = await self.fetch_api("players/active", params)
+            players_data = data.get("data", [])
+            
+            if not players_data:
                 break
-        
-        print(f"📊 Total players fetched: {len(all_players)} in {pages_fetched} pages")
+            
+            all_players.extend(players_data)
+            print(f"   ✓ Got {len(players_data)} players (total: {len(all_players)})")
+            
+            # Get next cursor from meta
+            meta = data.get("meta", {})
+            cursor = meta.get("next_cursor")
+            
+            if not cursor:
+                break
+            
+            await asyncio.sleep(0.1)  # Rate limiting
         
         synced = 0
-        updated = 0
-        errors = 0
+        for player_data in all_players:
+            player = db.query(Player).filter(Player.id == player_data["id"]).first()
+            
+            team_data = player_data.get("team", {})
+            
+            if not player:
+                player = Player(
+                    id=player_data["id"],
+                    first_name=player_data["first_name"],
+                    last_name=player_data["last_name"],
+                    position=player_data.get("position"),
+                    team_id=team_data.get("id") if team_data else None,
+                    team_name=team_data.get("full_name") if team_data else None,
+                    team_abbreviation=team_data.get("abbreviation") if team_data else None
+                )
+                db.add(player)
+                synced += 1
+            else:
+                # Update existing player
+                player.first_name = player_data["first_name"]
+                player.last_name = player_data["last_name"]
+                player.position = player_data.get("position")
+                player.team_id = team_data.get("id") if team_data else None
+                player.team_name = team_data.get("full_name") if team_data else None
+                player.team_abbreviation = team_data.get("abbreviation") if team_data else None
         
-        for idx, player_data in enumerate(all_players, 1):
-            try:
-                player = db.query(Player).filter(Player.id == player_data["id"]).first()
-                
-                team_data = player_data.get("team", {})
-                
-                if not player:
-                    player = Player(
-                        id=player_data["id"],
-                        first_name=player_data["first_name"],
-                        last_name=player_data["last_name"],
-                        position=player_data.get("position"),
-                        team_id=team_data.get("id") if team_data else None,
-                        team_name=team_data.get("full_name") if team_data else None,
-                        team_abbreviation=team_data.get("abbreviation") if team_data else None
-                    )
-                    db.add(player)
-                    synced += 1
-                else:
-                    player.first_name = player_data["first_name"]
-                    player.last_name = player_data["last_name"]
-                    player.position = player_data.get("position")
-                    player.team_id = team_data.get("id") if team_data else None
-                    player.team_name = team_data.get("full_name") if team_data else None
-                    player.team_abbreviation = team_data.get("abbreviation") if team_data else None
-                    updated += 1
-                
-                # Commit in batches of 50
-                if (synced + updated) % 50 == 0:
-                    db.commit()
-                    print(f"   💾 Saved batch: {synced + updated}/{len(all_players)} players")
-                    
-            except Exception as e:
-                db.rollback()
-                errors += 1
-                if errors <= 3:
-                    print(f"⚠️ Error with player {player_data.get('first_name', '')} {player_data.get('last_name', '')}: {e}")
-                continue
-        
-        try:
-            db.commit()
-            print(f"✅ Players synced: {synced} new, {updated} updated" + (f", {errors} errors" if errors > 0 else ""))
-        except Exception as e:
-            db.rollback()
-            print(f"⚠️ Error committing players: {e}")
-            raise
-        
+        db.commit()
+        print(f"✅ Players synced: {synced} new, {len(all_players) - synced} updated")
         return len(all_players)
     
     async def sync_games_for_date_range(
@@ -211,98 +181,86 @@ class DataSyncService:
         end_date: date,
         season: int
     ) -> int:
-        """Sync games and stats for a date range using cursor-based pagination"""
+        """Sync games and basic stats for a date range using cursor pagination"""
         print(f"📅 Syncing games from {start_date} to {end_date}...")
         
         all_stats = []
         cursor = None
-        pages_fetched = 0
-        max_pages = 1000  # Safety limit for large date ranges
+        page_count = 0
         
-        # Use start_date and end_date parameters instead of iterating by day
+        # Use cursor-based pagination with date range
         params = {
-            "per_page": 100,
             "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat()
+            "end_date": end_date.isoformat(),
+            "per_page": 100
         }
         
-        print(f"   Fetching stats for date range {start_date} to {end_date}...")
-        
-        while pages_fetched < max_pages:
+        while True:
+            page_count += 1
+            
+            if cursor:
+                params["cursor"] = cursor
+            
+            print(f"   Fetching stats page {page_count} (cursor: {cursor or 'initial'})...")
+            
             try:
-                if cursor:
-                    params["cursor"] = cursor
-                
-                print(f"   Fetching stats page {pages_fetched + 1} (cursor: {cursor or 'initial'})...")
                 data = await self.fetch_api("stats", params)
                 stats_data = data.get("data", [])
-                meta = data.get("meta", {})
                 
                 if not stats_data:
-                    print(f"   No more stats found")
                     break
                 
                 all_stats.extend(stats_data)
-                pages_fetched += 1
                 print(f"   ✓ Got {len(stats_data)} stats (total: {len(all_stats)})")
                 
-                # Check for next page
-                next_cursor = meta.get("next_cursor")
-                if not next_cursor:
-                    print(f"   Last page reached")
+                # Get next cursor from meta
+                meta = data.get("meta", {})
+                cursor = meta.get("next_cursor")
+                
+                if not cursor:
                     break
                 
-                cursor = next_cursor
-                await asyncio.sleep(0.6)  # Rate limiting for free tier
-                
+                await asyncio.sleep(0.1)
+            
             except Exception as e:
-                print(f"⚠️  Error fetching stats at cursor {cursor}: {e}")
+                print(f"⚠️  Error fetching stats: {e}")
                 break
-        
-        print(f"📊 Total stats fetched: {len(all_stats)} in {pages_fetched} pages")
         
         # Process and store stats
         games_synced = 0
         stats_synced = 0
-        games_seen = set()
         
         for stat in all_stats:
             game_data = stat.get("game", {})
             player_data = stat.get("player", {})
             team_data = stat.get("team", {})
             
-            game_id = game_data.get("id")
-            if not game_id:
-                continue
-            
-            # Ensure game exists (only create once per game)
-            if game_id not in games_seen:
-                game = db.query(Game).filter(Game.id == game_id).first()
-                if not game:
-                    game = Game(
-                        id=game_id,
-                        date=datetime.fromisoformat(game_data["date"]).date() if isinstance(game_data.get("date"), str) else game_data.get("date"),
-                        season=game_data.get("season", season),
-                        status=game_data.get("status"),
-                        home_team_id=game_data.get("home_team_id"),
-                        visitor_team_id=game_data.get("visitor_team_id"),
-                        home_team_score=game_data.get("home_team_score"),
-                        visitor_team_score=game_data.get("visitor_team_score")
-                    )
-                    db.add(game)
-                    games_synced += 1
-                games_seen.add(game_id)
+            # Ensure game exists
+            game = db.query(Game).filter(Game.id == game_data["id"]).first()
+            if not game:
+                game = Game(
+                    id=game_data["id"],
+                    date=datetime.fromisoformat(game_data["date"].replace('Z', '+00:00')).date(),
+                    season=game_data.get("season", season),
+                    status=game_data.get("status"),
+                    home_team_id=game_data.get("home_team_id"),
+                    visitor_team_id=game_data.get("visitor_team_id"),
+                    home_team_score=game_data.get("home_team_score"),
+                    visitor_team_score=game_data.get("visitor_team_score")
+                )
+                db.add(game)
+                games_synced += 1
             
             # Check if stat already exists
             existing_stat = db.query(GameStats).filter(
-                GameStats.player_id == player_data.get("id"),
-                GameStats.game_id == game_id
+                GameStats.player_id == player_data["id"],
+                GameStats.game_id == game_data["id"]
             ).first()
             
             if not existing_stat:
                 game_stat = GameStats(
-                    player_id=player_data.get("id"),
-                    game_id=game_id,
+                    player_id=player_data["id"],
+                    game_id=game_data["id"],
                     team_id=team_data.get("id"),
                     is_home=game_data.get("home_team_id") == team_data.get("id"),
                     minutes=stat.get("min"),
@@ -327,518 +285,269 @@ class DataSyncService:
                 )
                 db.add(game_stat)
                 stats_synced += 1
-            
-            # Commit in batches
-            if (games_synced + stats_synced) % 500 == 0:
-                db.commit()
-                print(f"   💾 Saved batch: {games_synced} games, {stats_synced} stats")
         
         db.commit()
         print(f"✅ Synced {games_synced} games, {stats_synced} player stats")
         return games_synced
     
-    # ========================================================================
-    # GOAT TIER SYNC FUNCTIONS
-    # ========================================================================
-    
-    async def sync_season_averages(self, db: Session, season: int) -> int:
-        """🐐 Calculate and store season averages for all active players"""
-        print(f"🐐 Calculating season averages for {season}...")
+    async def sync_advanced_stats_for_date_range(
+        self, 
+        db: Session, 
+        start_date: date, 
+        end_date: date,
+        season: int
+    ) -> int:
+        """Sync advanced stats (GOAT tier feature)"""
+        print(f"📊 Syncing advanced stats from {start_date} to {end_date}...")
         
-        # Get all players who played this season
-        player_stats = db.query(
-            GameStats.player_id,
-            func.count(GameStats.id).label('games_played'),
-            func.avg(GameStats.pts).label('avg_pts'),
-            func.avg(GameStats.ast).label('avg_ast'),
-            func.avg(GameStats.reb).label('avg_reb'),
-            func.avg(GameStats.stl).label('avg_stl'),
-            func.avg(GameStats.blk).label('avg_blk'),
-            func.avg(GameStats.fgm).label('avg_fgm'),
-            func.avg(GameStats.fga).label('avg_fga'),
-            func.avg(GameStats.fg3m).label('avg_fg3m'),
-            func.avg(GameStats.fg3a).label('avg_fg3a'),
-            func.avg(GameStats.ftm).label('avg_ftm'),
-            func.avg(GameStats.fta).label('avg_fta'),
-            func.avg(GameStats.oreb).label('avg_oreb'),
-            func.avg(GameStats.dreb).label('avg_dreb'),
-            func.avg(GameStats.turnover).label('avg_turnover'),
-            func.avg(GameStats.pf).label('avg_pf'),
-            func.sum(GameStats.fgm).label('total_fgm'),
-            func.sum(GameStats.fga).label('total_fga'),
-            func.sum(GameStats.fg3m).label('total_fg3m'),
-            func.sum(GameStats.fg3a).label('total_fg3a'),
-            func.sum(GameStats.ftm).label('total_ftm'),
-            func.sum(GameStats.fta).label('total_fta'),
-            func.sum(GameStats.pts).label('total_pts')
-        ).join(Game).filter(
-            Game.season == season
-        ).group_by(GameStats.player_id).all()
+        all_stats = []
+        cursor = None
         
-        synced = 0
-        for stats in player_stats:
-            if stats.games_played < 5:  # Skip players with very few games
-                continue
-            
-            # Calculate shooting percentages
-            fg_pct = stats.total_fgm / stats.total_fga if stats.total_fga > 0 else 0
-            fg3_pct = stats.total_fg3m / stats.total_fg3a if stats.total_fg3a > 0 else 0
-            ft_pct = stats.total_ftm / stats.total_fta if stats.total_fta > 0 else 0
-            
-            # Calculate efficiency metrics
-            # True Shooting % = PTS / (2 * (FGA + 0.44 * FTA))
-            ts_denominator = 2 * (stats.total_fga + 0.44 * stats.total_fta)
-            true_shooting = stats.total_pts / ts_denominator if ts_denominator > 0 else 0
-            
-            # Effective FG% = (FGM + 0.5 * 3PM) / FGA
-            effective_fg = (stats.total_fgm + 0.5 * stats.total_fg3m) / stats.total_fga if stats.total_fga > 0 else 0
-            
-            # Check if averages already exist
-            existing = db.query(SeasonAverages).filter(
-                SeasonAverages.player_id == stats.player_id,
-                SeasonAverages.season == season
-            ).first()
-            
-            if existing:
-                # Update existing
-                existing.games_played = stats.games_played
-                existing.avg_pts = stats.avg_pts
-                existing.avg_ast = stats.avg_ast
-                existing.avg_reb = stats.avg_reb
-                existing.avg_stl = stats.avg_stl
-                existing.avg_blk = stats.avg_blk
-                existing.avg_fgm = stats.avg_fgm
-                existing.avg_fga = stats.avg_fga
-                existing.avg_fg_pct = fg_pct
-                existing.avg_fg3m = stats.avg_fg3m
-                existing.avg_fg3a = stats.avg_fg3a
-                existing.avg_fg3_pct = fg3_pct
-                existing.avg_ftm = stats.avg_ftm
-                existing.avg_fta = stats.avg_fta
-                existing.avg_ft_pct = ft_pct
-                existing.avg_oreb = stats.avg_oreb
-                existing.avg_dreb = stats.avg_dreb
-                existing.avg_turnover = stats.avg_turnover
-                existing.avg_pf = stats.avg_pf
-                existing.true_shooting_pct = true_shooting
-                existing.effective_fg_pct = effective_fg
-                existing.last_updated = datetime.utcnow()
-            else:
-                # Create new
-                season_avg = SeasonAverages(
-                    player_id=stats.player_id,
-                    season=season,
-                    games_played=stats.games_played,
-                    avg_pts=stats.avg_pts,
-                    avg_ast=stats.avg_ast,
-                    avg_reb=stats.avg_reb,
-                    avg_stl=stats.avg_stl,
-                    avg_blk=stats.avg_blk,
-                    avg_fgm=stats.avg_fgm,
-                    avg_fga=stats.avg_fga,
-                    avg_fg_pct=fg_pct,
-                    avg_fg3m=stats.avg_fg3m,
-                    avg_fg3a=stats.avg_fg3a,
-                    avg_fg3_pct=fg3_pct,
-                    avg_ftm=stats.avg_ftm,
-                    avg_fta=stats.avg_fta,
-                    avg_ft_pct=ft_pct,
-                    avg_oreb=stats.avg_oreb,
-                    avg_dreb=stats.avg_dreb,
-                    avg_turnover=stats.avg_turnover,
-                    avg_pf=stats.avg_pf,
-                    true_shooting_pct=true_shooting,
-                    effective_fg_pct=effective_fg
-                )
-                db.add(season_avg)
-            
-            synced += 1
+        params = {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "per_page": 100,
+            "seasons[]": season
+        }
         
-        db.commit()
-        print(f"✅ Season averages synced for {synced} players")
-        return synced
-    
-    async def sync_team_standings(self, db: Session, season: int) -> int:
-        """🐐 Calculate and store team standings"""
-        print(f"🐐 Calculating team standings for {season}...")
-        
-        teams = db.query(Team).all()
-        synced = 0
-        
-        for team in teams:
-            # Get all games for this team
-            home_games = db.query(Game).filter(
-                Game.home_team_id == team.id,
-                Game.season == season,
-                Game.home_team_score != None  # Only completed games
-            ).all()
+        while True:
+            if cursor:
+                params["cursor"] = cursor
             
-            away_games = db.query(Game).filter(
-                Game.visitor_team_id == team.id,
-                Game.season == season,
-                Game.visitor_team_score != None
-            ).all()
-            
-            # Calculate records
-            home_wins = sum(1 for g in home_games if g.home_team_score > g.visitor_team_score)
-            home_losses = len(home_games) - home_wins
-            away_wins = sum(1 for g in away_games if g.visitor_team_score > g.home_team_score)
-            away_losses = len(away_games) - away_wins
-            
-            total_wins = home_wins + away_wins
-            total_losses = home_losses + away_losses
-            total_games = total_wins + total_losses
-            
-            if total_games == 0:
-                continue
-            
-            win_pct = total_wins / total_games
-            
-            # Calculate scoring
-            home_points = [g.home_team_score for g in home_games]
-            away_points = [g.visitor_team_score for g in away_games]
-            all_points_scored = home_points + away_points
-            
-            home_points_allowed = [g.visitor_team_score for g in home_games]
-            away_points_allowed = [g.home_team_score for g in away_games]
-            all_points_allowed = home_points_allowed + away_points_allowed
-            
-            avg_scored = sum(all_points_scored) / len(all_points_scored) if all_points_scored else 0
-            avg_allowed = sum(all_points_allowed) / len(all_points_allowed) if all_points_allowed else 0
-            
-            # Determine current streak
-            all_games_chronological = sorted(
-                home_games + away_games,
-                key=lambda g: g.date,
-                reverse=True
-            )
-            
-            current_streak = ""
-            if all_games_chronological:
-                last_game = all_games_chronological[0]
-                is_win = (
-                    (last_game.home_team_id == team.id and last_game.home_team_score > last_game.visitor_team_score) or
-                    (last_game.visitor_team_id == team.id and last_game.visitor_team_score > last_game.home_team_score)
-                )
+            try:
+                # GOAT tier endpoint
+                data = await self.fetch_api("stats/advanced", params)
+                stats_data = data.get("data", [])
                 
-                streak_count = 0
-                for game in all_games_chronological:
-                    game_is_win = (
-                        (game.home_team_id == team.id and game.home_team_score > game.visitor_team_score) or
-                        (game.visitor_team_id == team.id and game.visitor_team_score > game.home_team_score)
-                    )
-                    
-                    if game_is_win == is_win:
-                        streak_count += 1
-                    else:
-                        break
+                if not stats_data:
+                    break
                 
-                current_streak = f"{'W' if is_win else 'L'}{streak_count}"
+                all_stats.extend(stats_data)
+                print(f"   ✓ Got {len(stats_data)} advanced stats (total: {len(all_stats)})")
+                
+                meta = data.get("meta", {})
+                cursor = meta.get("next_cursor")
+                
+                if not cursor:
+                    break
+                
+                await asyncio.sleep(0.1)
             
-            # Update or create standings
-            existing = db.query(TeamStandings).filter(
-                TeamStandings.team_id == team.id,
-                TeamStandings.season == season
-            ).first()
-            
-            if existing:
-                existing.wins = total_wins
-                existing.losses = total_losses
-                existing.win_pct = win_pct
-                existing.home_wins = home_wins
-                existing.home_losses = home_losses
-                existing.away_wins = away_wins
-                existing.away_losses = away_losses
-                existing.current_streak = current_streak
-                existing.avg_points_scored = avg_scored
-                existing.avg_points_allowed = avg_allowed
-                existing.last_updated = datetime.utcnow()
-            else:
-                standing = TeamStandings(
-                    team_id=team.id,
-                    season=season,
-                    wins=total_wins,
-                    losses=total_losses,
-                    win_pct=win_pct,
-                    home_wins=home_wins,
-                    home_losses=home_losses,
-                    away_wins=away_wins,
-                    away_losses=away_losses,
-                    current_streak=current_streak,
-                    avg_points_scored=avg_scored,
-                    avg_points_allowed=avg_allowed
-                )
-                db.add(standing)
-            
-            synced += 1
-        
-        db.commit()
-        print(f"✅ Team standings synced for {synced} teams")
-        return synced
-    
-    async def sync_head_to_head(self, db: Session, season: int) -> int:
-        """🐐 Calculate head-to-head matchup records"""
-        print(f"🐐 Calculating head-to-head matchups for {season}...")
-        
-        # Get all completed games
-        games = db.query(Game).filter(
-            Game.season == season,
-            Game.home_team_score != None
-        ).all()
-        
-        # Build matchup records
-        matchups = defaultdict(lambda: {
-            "team1_wins": 0,
-            "team2_wins": 0,
-            "team1_scores": [],
-            "team2_scores": [],
-            "last_game": None,
-            "last_winner": None,
-            "last_score": ""
-        })
-        
-        for game in games:
-            # Create consistent key (lower ID first)
-            key = tuple(sorted([game.home_team_id, game.visitor_team_id]))
-            matchup = matchups[key]
-            
-            # Determine winner
-            home_won = game.home_team_score > game.visitor_team_score
-            
-            # Update matchup stats
-            if key[0] == game.home_team_id:
-                if home_won:
-                    matchup["team1_wins"] += 1
-                else:
-                    matchup["team2_wins"] += 1
-                matchup["team1_scores"].append(game.home_team_score)
-                matchup["team2_scores"].append(game.visitor_team_score)
-            else:
-                if home_won:
-                    matchup["team2_wins"] += 1
-                else:
-                    matchup["team1_wins"] += 1
-                matchup["team2_scores"].append(game.home_team_score)
-                matchup["team1_scores"].append(game.visitor_team_score)
-            
-            # Track last game
-            if matchup["last_game"] is None or game.date > matchup["last_game"]:
-                matchup["last_game"] = game.date
-                matchup["last_winner"] = game.home_team_id if home_won else game.visitor_team_id
-                matchup["last_score"] = f"{game.home_team_score}-{game.visitor_team_score}"
+            except Exception as e:
+                print(f"⚠️  Error fetching advanced stats: {e}")
+                break
         
         # Store in database
-        synced = 0
-        for (team1_id, team2_id), data in matchups.items():
-            team1_avg = sum(data["team1_scores"]) / len(data["team1_scores"]) if data["team1_scores"] else 0
-            team2_avg = sum(data["team2_scores"]) / len(data["team2_scores"]) if data["team2_scores"] else 0
+        stats_synced = 0
+        for stat in all_stats:
+            player_data = stat.get("player", {})
+            game_data = stat.get("game", {})
+            team_data = stat.get("team", {})
             
-            existing = db.query(HeadToHead).filter(
-                or_(
-                    and_(HeadToHead.team_1_id == team1_id, HeadToHead.team_2_id == team2_id),
-                    and_(HeadToHead.team_1_id == team2_id, HeadToHead.team_2_id == team1_id)
-                ),
-                HeadToHead.season == season
+            # Check if exists
+            existing = db.query(AdvancedStats).filter(
+                AdvancedStats.player_id == player_data["id"],
+                AdvancedStats.game_id == game_data["id"]
             ).first()
             
-            if existing:
-                existing.team_1_wins = data["team1_wins"]
-                existing.team_2_wins = data["team2_wins"]
-                existing.team_1_avg_score = team1_avg
-                existing.team_2_avg_score = team2_avg
-                existing.last_game_date = data["last_game"]
-                existing.last_game_winner = data["last_winner"]
-                existing.last_game_score = data["last_score"]
-                existing.last_updated = datetime.utcnow()
-            else:
-                h2h = HeadToHead(
-                    team_1_id=team1_id,
-                    team_2_id=team2_id,
-                    season=season,
-                    team_1_wins=data["team1_wins"],
-                    team_2_wins=data["team2_wins"],
-                    team_1_avg_score=team1_avg,
-                    team_2_avg_score=team2_avg,
-                    last_game_date=data["last_game"],
-                    last_game_winner=data["last_winner"],
-                    last_game_score=data["last_score"]
+            if not existing:
+                adv_stat = AdvancedStats(
+                    id=stat.get("id"),
+                    player_id=player_data["id"],
+                    game_id=game_data["id"],
+                    team_id=team_data.get("id"),
+                    pie=stat.get("pie"),
+                    pace=stat.get("pace"),
+                    assist_percentage=stat.get("assist_percentage"),
+                    assist_ratio=stat.get("assist_ratio"),
+                    assist_to_turnover=stat.get("assist_to_turnover"),
+                    defensive_rating=stat.get("defensive_rating"),
+                    defensive_rebound_percentage=stat.get("defensive_rebound_percentage"),
+                    effective_field_goal_percentage=stat.get("effective_field_goal_percentage"),
+                    net_rating=stat.get("net_rating"),
+                    offensive_rating=stat.get("offensive_rating"),
+                    offensive_rebound_percentage=stat.get("offensive_rebound_percentage"),
+                    rebound_percentage=stat.get("rebound_percentage"),
+                    true_shooting_percentage=stat.get("true_shooting_percentage"),
+                    turnover_ratio=stat.get("turnover_ratio"),
+                    usage_percentage=stat.get("usage_percentage")
                 )
-                db.add(h2h)
-            
-            synced += 1
+                db.add(adv_stat)
+                stats_synced += 1
         
         db.commit()
-        print(f"✅ Head-to-head records synced for {synced} matchups")
-        return synced
+        print(f"✅ Synced {stats_synced} advanced stats")
+        return stats_synced
     
-    async def detect_performance_streaks(self, db: Session, season: int, min_streak: int = 3) -> int:
-        """🐐 Detect hot/cold performance streaks for players"""
-        print(f"🐐 Detecting performance streaks for {season}...")
+    async def sync_player_injuries(self, db: Session) -> int:
+        """Sync current player injuries (ALL-STAR+ tier)"""
+        print("🏥 Syncing player injuries...")
         
-        # Get all players with recent activity
-        recent_date = date.today() - timedelta(days=30)
+        cursor = None
+        all_injuries = []
         
-        active_players = db.query(GameStats.player_id).join(Game).filter(
-            Game.season == season,
-            Game.date >= recent_date
-        ).distinct().all()
+        while True:
+            params = {"per_page": 100}
+            if cursor:
+                params["cursor"] = cursor
+            
+            try:
+                data = await self.fetch_api("player_injuries", params)
+                injuries_data = data.get("data", [])
+                
+                if not injuries_data:
+                    break
+                
+                all_injuries.extend(injuries_data)
+                print(f"   ✓ Got {len(injuries_data)} injuries (total: {len(all_injuries)})")
+                
+                meta = data.get("meta", {})
+                cursor = meta.get("next_cursor")
+                
+                if not cursor:
+                    break
+                
+                await asyncio.sleep(0.1)
+            
+            except Exception as e:
+                print(f"⚠️  Error fetching injuries: {e}")
+                break
         
+        # Clear old injuries (they change daily)
+        db.query(PlayerInjury).delete()
+        
+        # Add new ones
+        for injury_data in all_injuries:
+            player_data = injury_data.get("player", {})
+            
+            injury = PlayerInjury(
+                player_id=player_data["id"],
+                return_date=injury_data.get("return_date"),
+                description=injury_data.get("description"),
+                status=injury_data.get("status")
+            )
+            db.add(injury)
+        
+        db.commit()
+        print(f"✅ Synced {len(all_injuries)} injuries")
+        return len(all_injuries)
+    
+    async def sync_betting_odds_for_date(self, db: Session, target_date: date) -> int:
+        """Sync betting odds for a specific date (GOAT tier)"""
+        print(f"💰 Syncing betting odds for {target_date}...")
+        
+        cursor = None
+        all_odds = []
+        
+        while True:
+            params = {
+                "dates[]": target_date.isoformat(),
+                "per_page": 100
+            }
+            if cursor:
+                params["cursor"] = cursor
+            
+            try:
+                # Note: v2 endpoint for odds!
+                url = f"{BALLDONTLIE_BASE_URL.replace('/v1', '/v2')}/odds"
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(url, headers=self.headers, params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                
+                odds_data = data.get("data", [])
+                
+                if not odds_data:
+                    break
+                
+                all_odds.extend(odds_data)
+                print(f"   ✓ Got {len(odds_data)} odds lines (total: {len(all_odds)})")
+                
+                meta = data.get("meta", {})
+                cursor = meta.get("next_cursor")
+                
+                if not cursor:
+                    break
+                
+                await asyncio.sleep(0.1)
+            
+            except Exception as e:
+                print(f"⚠️  Error fetching odds: {e}")
+                break
+        
+        # Store odds
         synced = 0
-        metrics = ['pts', 'fg3m', 'ast', 'reb', 'stl', 'blk']
-        
-        for (player_id,) in active_players:
-            # Get player's season average for comparison
-            season_avg = db.query(SeasonAverages).filter(
-                SeasonAverages.player_id == player_id,
-                SeasonAverages.season == season
+        for odds in all_odds:
+            existing = db.query(BettingOdds).filter(
+                BettingOdds.id == odds["id"]
             ).first()
             
-            if not season_avg:
-                continue
-            
-            # Get last 10 games
-            recent_games = db.query(GameStats).join(Game).filter(
-                GameStats.player_id == player_id,
-                Game.season == season
-            ).order_by(Game.date.desc()).limit(10).all()
-            
-            if len(recent_games) < 5:
-                continue
-            
-            # Check each metric for streaks
-            for metric in metrics:
-                avg_value = getattr(season_avg, f'avg_{metric}')
-                if not avg_value or avg_value == 0:
-                    continue
-                
-                # Define hot/cold thresholds
-                hot_threshold = avg_value * 1.2  # 20% above average
-                cold_threshold = avg_value * 0.8  # 20% below average
-                
-                # Check for hot streak
-                hot_count = 0
-                hot_values = []
-                for game in recent_games:
-                    value = getattr(game, metric, 0)
-                    if value >= hot_threshold:
-                        hot_count += 1
-                        hot_values.append(value)
-                    else:
-                        break
-                
-                # Check for cold streak
-                cold_count = 0
-                cold_values = []
-                for game in recent_games:
-                    value = getattr(game, metric, 0)
-                    if value <= cold_threshold:
-                        cold_count += 1
-                        cold_values.append(value)
-                    else:
-                        break
-                
-                # Store streak if significant
-                if hot_count >= min_streak:
-                    existing = db.query(PerformanceStreak).filter(
-                        PerformanceStreak.player_id == player_id,
-                        PerformanceStreak.season == season,
-                        PerformanceStreak.metric == metric,
-                        PerformanceStreak.streak_type == 'hot',
-                        PerformanceStreak.is_active == True
-                    ).first()
-                    
-                    if existing:
-                        existing.current_streak = hot_count
-                        existing.best_performance = max(hot_values)
-                        existing.avg_performance = sum(hot_values) / len(hot_values)
-                        existing.last_updated = datetime.utcnow()
-                    else:
-                        streak = PerformanceStreak(
-                            player_id=player_id,
-                            season=season,
-                            metric=metric,
-                            streak_type='hot',
-                            threshold=hot_threshold,
-                            current_streak=hot_count,
-                            streak_start_date=recent_games[hot_count-1].game.date,
-                            best_performance=max(hot_values),
-                            avg_performance=sum(hot_values) / len(hot_values),
-                            is_active=True
-                        )
-                        db.add(streak)
-                    synced += 1
-                
-                elif cold_count >= min_streak:
-                    existing = db.query(PerformanceStreak).filter(
-                        PerformanceStreak.player_id == player_id,
-                        PerformanceStreak.season == season,
-                        PerformanceStreak.metric == metric,
-                        PerformanceStreak.streak_type == 'cold',
-                        PerformanceStreak.is_active == True
-                    ).first()
-                    
-                    if existing:
-                        existing.current_streak = cold_count
-                        existing.best_performance = min(cold_values)
-                        existing.avg_performance = sum(cold_values) / len(cold_values)
-                        existing.last_updated = datetime.utcnow()
-                    else:
-                        streak = PerformanceStreak(
-                            player_id=player_id,
-                            season=season,
-                            metric=metric,
-                            streak_type='cold',
-                            threshold=cold_threshold,
-                            current_streak=cold_count,
-                            streak_start_date=recent_games[cold_count-1].game.date,
-                            best_performance=min(cold_values),
-                            avg_performance=sum(cold_values) / len(cold_values),
-                            is_active=True
-                        )
-                        db.add(streak)
-                    synced += 1
+            if not existing:
+                betting_odds = BettingOdds(
+                    id=odds["id"],
+                    game_id=odds["game_id"],
+                    vendor=odds["vendor"],
+                    spread_home_value=odds.get("spread_home_value"),
+                    spread_home_odds=odds.get("spread_home_odds"),
+                    spread_away_value=odds.get("spread_away_value"),
+                    spread_away_odds=odds.get("spread_away_odds"),
+                    moneyline_home_odds=odds.get("moneyline_home_odds"),
+                    moneyline_away_odds=odds.get("moneyline_away_odds"),
+                    total_value=odds.get("total_value"),
+                    total_over_odds=odds.get("total_over_odds"),
+                    total_under_odds=odds.get("total_under_odds"),
+                    updated_at=datetime.fromisoformat(odds["updated_at"].replace('Z', '+00:00'))
+                )
+                db.add(betting_odds)
+                synced += 1
+            else:
+                # Update existing odds (they change frequently)
+                existing.spread_home_value = odds.get("spread_home_value")
+                existing.spread_home_odds = odds.get("spread_home_odds")
+                existing.spread_away_value = odds.get("spread_away_value")
+                existing.spread_away_odds = odds.get("spread_away_odds")
+                existing.moneyline_home_odds = odds.get("moneyline_home_odds")
+                existing.moneyline_away_odds = odds.get("moneyline_away_odds")
+                existing.total_value = odds.get("total_value")
+                existing.total_over_odds = odds.get("total_over_odds")
+                existing.total_under_odds = odds.get("total_under_odds")
+                existing.updated_at = datetime.fromisoformat(odds["updated_at"].replace('Z', '+00:00'))
         
         db.commit()
-        print(f"✅ Performance streaks detected: {synced}")
+        print(f"✅ Synced {synced} odds records, {len(all_odds) - synced} updated")
         return synced
-    
-    # ========================================================================
-    # DAILY SYNC
-    # ========================================================================
-    
-    async def sync_recent_games(self, db: Session, days_back: int = 7) -> int:
-        """Sync recent games (last N days)"""
-        end_date = date.today()
-        start_date = end_date - timedelta(days=days_back)
-        current_season = 2024
-        
-        return await self.sync_games_for_date_range(db, start_date, end_date, current_season)
     
     async def perform_daily_sync(self):
-        """Main sync function to run daily"""
-        print("🚀 Starting daily NBA data sync...")
+        """Enhanced daily sync with GOAT tier features"""
+        print("🚀 Starting daily NBA data sync (GOAT Edition)...")
         
         with get_db_context() as db:
             try:
-                # Core sync
+                # 1. Sync teams (quick)
                 await self.sync_teams(db)
+                
+                # 2. Sync active players only (GOAT tier)
                 await self.sync_players(db)
                 
+                # 3. Sync yesterday's games and basic stats
                 yesterday = date.today() - timedelta(days=1)
                 games_synced = await self.sync_games_for_date_range(
-                    db, 
-                    yesterday, 
-                    yesterday,
-                    2024
+                    db, yesterday, yesterday, 2024
                 )
                 
-                # GOAT tier sync
-                await self.sync_season_averages(db, 2024)
-                await self.sync_team_standings(db, 2024)
-                await self.sync_head_to_head(db, 2024)
-                await self.detect_performance_streaks(db, 2024)
+                # 4. GOAT TIER: Sync advanced stats for yesterday
+                await self.sync_advanced_stats_for_date_range(
+                    db, yesterday, yesterday, 2024
+                )
                 
-                # Log sync
+                # 5. GOAT TIER: Sync injuries (daily update)
+                await self.sync_player_injuries(db)
+                
+                # 6. GOAT TIER: Sync betting odds for today
+                today = date.today()
+                await self.sync_betting_odds_for_date(db, today)
+                
+                # Log success
                 log = SyncLog(
                     sync_date=datetime.utcnow(),
                     season=2024,
@@ -848,7 +557,7 @@ class DataSyncService:
                 db.add(log)
                 db.commit()
                 
-                print("✅ Daily sync completed successfully!")
+                print("✅ Daily sync completed successfully (GOAT Edition)!")
                 return True
                 
             except Exception as e:
@@ -872,4 +581,5 @@ async def run_daily_sync():
 
 
 if __name__ == "__main__":
+    # Can be run manually for testing
     asyncio.run(run_daily_sync())
