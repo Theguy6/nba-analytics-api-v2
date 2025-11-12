@@ -288,8 +288,8 @@ async def get_standings(
     
     return await forward_to_balldontlie("/v1/standings", params)
 
-@app.get("/api/v1/injuries")
-async def get_injuries(
+@app.get("/api/v1/player_injuries")
+async def get_player_injuries(
     season: Optional[int] = None,
     dates: Optional[List[str]] = Query(None, alias="dates[]"),
     team_ids: Optional[List[int]] = Query(None, alias="team_ids[]"),
@@ -297,7 +297,7 @@ async def get_injuries(
     cursor: Optional[str] = None,
     per_page: int = Query(25, le=100)
 ):
-    """Get injury reports (GOAT tier only)"""
+    """Get player injury reports (GOAT tier only) - FIXED ENDPOINT"""
     params = {"per_page": per_page}
     if season:
         params["season"] = season
@@ -310,7 +310,7 @@ async def get_injuries(
     if cursor:
         params["cursor"] = cursor
     
-    return await forward_to_balldontlie("/v1/injuries", params)
+    return await forward_to_balldontlie("/v1/player_injuries", params)
 
 @app.get("/api/v1/active_players")
 async def get_active_players(
@@ -407,7 +407,7 @@ async def get_todays_betting_slate():
     
     # Get injuries
     try:
-        injuries_data = await forward_to_balldontlie("/v1/injuries", {"dates[]": [today]})
+        injuries_data = await forward_to_balldontlie("/v1/player_injuries", {"dates[]": [today]})
     except:
         injuries_data = {"data": []}
     
@@ -502,7 +502,7 @@ async def root():
             "BallDontLie GOAT tier relay",
             "Live betting odds (v2/odds)",
             "Advanced season averages",
-            "Real-time injury reports",
+            "Real-time injury reports (FIXED)",
             "Statistical leaders",
             "Box scores & live stats",
             "Custom betting analytics"
@@ -511,7 +511,8 @@ async def root():
         "endpoints": {
             "nba_v1": "/api/v1/*",
             "betting_odds_v2": "/api/v2/odds",
-            "custom_analytics": "/api/betting/*"
+            "custom_analytics": "/api/betting/*",
+            "injuries_fixed": "/api/v1/player_injuries"
         }
     }
 
@@ -530,6 +531,7 @@ async def health_check():
         "database": "connected",
         "balldontlie_api": balldontlie_status,
         "tier": "GOAT",
+        "injuries_endpoint": "FIXED - now using /v1/player_injuries",
         "timestamp": datetime.utcnow().isoformat()
     }
 
